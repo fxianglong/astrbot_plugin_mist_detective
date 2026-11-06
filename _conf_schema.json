@@ -1,0 +1,52 @@
+{
+  "gen_provider_id": {
+    "description": "生成案件使用的模型",
+    "type": "string",
+    "default": "",
+    "hint": "写案件需要较强的推理和长文本能力，推荐 DeepSeek（deepseek-chat / deepseek-reasoner）或 Qwen-Max 等。留空则使用当前会话的对话模型。",
+    "_special": "select_provider"
+  },
+  "npc_provider_id": {
+    "description": "审讯、出示和结案使用的模型",
+    "type": "string",
+    "default": "",
+    "hint": "每次审讯调用一次，可以选便宜快速的模型（如 deepseek-chat、qwen-plus）。留空则使用当前会话的对话模型。",
+    "_special": "select_provider"
+  },
+  "default_style": {
+    "description": "默认风格",
+    "type": "string",
+    "default": "本格",
+    "options": ["本格", "社会派", "轻松喜剧"],
+    "hint": "开局时没指定风格就用这个。也可以开局时临时指定，如 /案件 开局 喜剧。"
+  },
+  "verify_solvable": {
+    "description": "生成后做唯一解检查",
+    "type": "bool",
+    "default": true,
+    "hint": "让模型只看线索推一次凶手，推不出真凶就重写。多一次模型调用，但能明显减少推不出来的烂案子。"
+  },
+  "gen_attempts": {
+    "description": "生成最多尝试次数",
+    "type": "int",
+    "default": 3,
+    "hint": "档案没通过检查时自动重写，最多尝试这么多次。"
+  },
+  "gen_timeout": {
+    "description": "单次生成超时（秒）",
+    "type": "int",
+    "default": 240,
+    "hint": "推理类模型（如 deepseek-reasoner）写完整档案可能需要两三分钟。"
+  },
+  "npc_timeout": {
+    "description": "审讯超时（秒）",
+    "type": "int",
+    "default": 60
+  },
+  "idle_hours": {
+    "description": "闲置多久自动归档（小时）",
+    "type": "int",
+    "default": 48,
+    "hint": "一局可以跨天玩；超过这个时间没人操作就归档并公布真凶。0 表示不归档。"
+  }
+}
