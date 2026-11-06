@@ -1,0 +1,7 @@
+name: astrbot_plugin_mist_detective
+display_name: 雾夜侦探社
+desc: AI 现场生成剧本的群聊推理游戏。四种题材、六种诡计、三种风格，群友一起审讯嫌疑人、搜查现场、出示证据，在行动点用完前指认真凶。每个案件都经过可解性和唯一解检查。
+short_desc: AI 生成剧本的群聊推理游戏
+version: v0.1.0
+author: fxianglong
+repo: https://github.com/fxianglong/astrbot_plugin_mist_detective
