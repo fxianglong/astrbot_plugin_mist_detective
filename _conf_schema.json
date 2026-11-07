@@ -17,7 +17,11 @@
     "description": "默认风格",
     "type": "string",
     "default": "本格",
-    "options": ["本格", "社会派", "轻松喜剧"],
+    "options": [
+      "本格",
+      "社会派",
+      "轻松喜剧"
+    ],
     "hint": "开局时没指定风格就用这个。也可以开局时临时指定，如 /案件 开局 喜剧。"
   },
   "verify_solvable": {
@@ -48,5 +52,16 @@
     "type": "int",
     "default": 48,
     "hint": "一局可以跨天玩；超过这个时间没人操作就归档并公布真凶。0 表示不归档。"
+  },
+  "vote_accuse": {
+    "description": "群聊中投票指认",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后，群里有两人以上参与本案时，/指认 会发起投票，过半赞成才执行。私聊或单人游玩时直接指认。"
+  },
+  "vote_seconds": {
+    "description": "投票时长（秒）",
+    "type": "int",
+    "default": 60
   }
 }

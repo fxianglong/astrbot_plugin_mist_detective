@@ -236,12 +236,53 @@ def spend(game: dict) -> list[str]:
         game["ap"] = game["ap_plan"][2]
         for sid in game["pressure"]:
             add_pressure(game, sid, 15)
-        msgs.append(f"━━ 第三幕 · 交锋 ━━\n真相近在咫尺，每个人都察觉到了你们的目光，神色越发紧张（所有人紧张度 +15）。\n这是最后一幕，行动点 {game['ap']}。想好了就 /指认。")
+        climax = (game["case"].get("climax") or {}).get("text") or "真相近在咫尺，每个人都察觉到了你们的目光，神色越发紧张。"
+        msgs.append(f"━━ 第三幕 · 交锋 ━━\n{climax}\n（所有人紧张度 +15。这是最后一幕，行动点 {game['ap']}，可以 /对质 让两人当面对口供。想好了就 /指认。）")
     else:
         game["final"] = True
         game["ap"] = 0
         msgs.append("━━ 最后时刻 ━━\n行动点已经用完，再没有时间调查了。请用 /指认 名字 说出凶手（可以附上动机和手法）。")
     return msgs
+
+
+def confront_breaks(game: dict, a: str, b: str) -> list[tuple[dict, dict]]:
+    """对质时当场戳穿的谎言：两人中任何一人、尚未识破、且识破它的线索已经到手。"""
+    out = []
+    for sid in (a, b):
+        s = suspect(game, sid)
+        for l in s["lies"] if s else []:
+            if l["id"] not in game["broken"] and l["broken_by"] and l["broken_by"] in game["found"]:
+                out.append((s, l))
+    return out
+
+
+# ---------------------------------------------------------------- 投票
+def start_vote(game: dict, target: str, uid: str, name: str, reasoning: str, secs: int, now: float | None = None) -> dict:
+    now = now or time.time()
+    v = {"id": f"{int(now * 1000)}", "target": target, "by": uid, "by_name": name, "reasoning": reasoning,
+         "yes": [uid], "no": [], "deadline": now + secs}
+    game["vote"] = v
+    return v
+
+
+def cast_vote(game: dict, uid: str, name: str, agree: bool) -> None:
+    v = game["vote"]
+    game["players"].setdefault(uid, {"name": name, "pts": 0, "actions": 0})
+    for k in ("yes", "no"):
+        if uid in v[k]:
+            v[k].remove(uid)
+    v["yes" if agree else "no"].append(uid)
+
+
+def vote_verdict(game: dict) -> bool | None:
+    """票数已经决定结果时返回 True/False，否则 None。以参与本案的人数为基数，过半通过。"""
+    v = game["vote"]
+    n = max(len(game["players"]), 1)
+    if len(v["yes"]) * 2 > n:
+        return True
+    if len(v["no"]) * 2 >= n:
+        return False
+    return None
 
 
 # ---------------------------------------------------------------- 提示
@@ -319,9 +360,9 @@ def opening(game: dict) -> str:
         "",
         "可搜查：" + "、".join(case["locations"]),
         "",
-        "玩法：/审讯 名字 问题｜/搜查 地点｜/出示 线索编号 名字｜/指认 名字 动机和手法",
+        "玩法：/审讯 名字 问题｜/搜查 地点｜/出示 线索编号 名字｜/对质 名字 名字 话题｜/指认 名字 动机和手法",
         "其他：/案件 卷宗（随时查看进度）｜/提示（扣 5 分）｜/笔记 内容",
-        status_line(game) + "。每次审讯、搜查、出示消耗 1 点，全群共用。",
+        status_line(game) + "。每次审讯、搜查、出示、对质消耗 1 点，全群共用。",
     ]
     return "\n".join(lines)
 
