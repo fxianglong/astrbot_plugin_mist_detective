@@ -29,13 +29,17 @@ def pick_skeleton(
     diff: Difficulty | None = None,
     trick: Trick | None = None,
     avoid: tuple[str, ...] = (),
+    disabled_themes: set[str] = frozenset(),
+    disabled_tricks: set[str] = frozenset(),
 ) -> Skeleton:
-    """随机抽骨架；avoid 是最近用过的“题材:诡计”组合，尽量不重复。"""
-    theme = theme or rng.choice(list(THEMES.values()))
+    """随机抽骨架；avoid 是最近用过的“题材:诡计”组合，尽量不重复；disabled_* 是群管理关掉的题材和诡计（key）。"""
+    if theme is None:
+        themes = [t for t in THEMES.values() if t.key not in disabled_themes] or list(THEMES.values())
+        theme = rng.choice(themes)
     style = style or STYLES["honkaku"]
     diff = diff or DIFFICULTIES["normal"]
     if trick is None:
-        pool = [t for t in TRICKS.values() if not t.themes or theme.key in t.themes]
+        pool = [t for t in TRICKS.values() if (not t.themes or theme.key in t.themes) and t.key not in disabled_tricks] or list(TRICKS.values())
         fresh = [t for t in pool if f"{theme.key}:{t.key}" not in avoid] or pool
         trick = rng.choice(fresh)
     return Skeleton(theme, trick, style, diff, rng.randrange(1 << 30))
@@ -82,7 +86,8 @@ SCHEMA = """{
   ],
   "clues": [
     {"id": "c1", "name": "线索名，四到八个字", "text": "玩家拿到时看到的描述", "source": "search", "location": "所在地点（必须是 locations 之一）", "points_to": "指向的嫌疑人 id，不指向任何人留空", "key": true},
-    {"id": "c2", "name": "...", "text": "这个人会说出的话或透露的信息", "source": "testimony", "holder": "掌握它的嫌疑人 id", "topic": "问到什么话题时会说", "points_to": "", "key": false}
+    {"id": "c2", "name": "...", "text": "这个人会说出的话或透露的信息", "source": "testimony", "holder": "掌握它的嫌疑人 id", "topic": "问到什么话题时会说", "points_to": "", "key": false},
+    {"id": "c9", "name": "...", "text": "彩蛋内容", "source": "testimony", "holder": "s2", "topic": "非常具体的触发话题", "points_to": "", "key": false, "hidden": true}
   ],
   "event": {"text": "第二幕的突发事件，80~150 字，推翻大家的第一印象，并带出新线索", "clues": ["事件带出的线索编号，这些线索 source 写 event"]},
   "climax": {"text": "第三幕开场的事件，50~100 字，制造紧迫感或新的冲突（如有人试图销毁证据、暴风雪切断灯火、某人突然翻供），不带新的关键线索"},
@@ -98,8 +103,8 @@ def gen_prompt(sk: Skeleton, feedback: str = "") -> str:
         "请设计一个案件。",
         f"【题材】{sk.theme.name}：{sk.theme.setting}",
         f"【气氛】{sk.theme.mood}",
-        f"【地点参考】{'、'.join(sk.theme.locations)}（可以改名或替换，保持 5~6 个）",
-        f"【人物原型参考】{'、'.join(sk.theme.archetypes)}（挑选或改编，不必全用）",
+        f"【地点参考】{'、'.join(sk.theme.locations) or '按题材自拟'}（可以改名或替换，保持 5~6 个）",
+        f"【人物原型参考】{'、'.join(sk.theme.archetypes) or '按题材自拟'}（挑选或改编，不必全用）",
         f"【起名】{sk.theme.naming}",
         f"【时间】{sk.theme.time_note}",
         f"【风格】{sk.style.guide}",
@@ -109,6 +114,7 @@ def gen_prompt(sk: Skeleton, feedback: str = "") -> str:
         f"至少 {d.key_clues} 张 key=true 且 points_to 为凶手的关键线索；红鲱鱼（指向无辜者的误导线索）{d.red_herrings} 张。",
         "【结构】三层：表层有一个“看起来最像凶手”的无辜者；中层是各人的秘密与红鲱鱼；深层才是真正的诡计。第二幕事件要推翻表层印象，第三幕事件把紧张感推到顶点。",
         "【线索分布】既要有 search（搜查地点得到）也要有 testimony（审讯时嫌疑人说出），event 线索 1~2 张。凶手至少有 1 条能被线索识破的谎言（lies.broken_by）；其他人可以各有 0~2 条谎言。",
+        "【彩蛋】另设 1 张隐藏线索（hidden=true，source=testimony，key=false）：只有侦探问到一个非常具体、意想不到的话题时才会说出，内容有趣或带出一段旧事，不影响破案。",
         "【时间线】按时间顺序列出 10~16 条，包含凶手作案的真实过程和每个嫌疑人在关键时段的真实位置；同一个人同一时刻只能在一个地方。",
         "",
         "请严格按下面的 JSON 结构输出（字段名不要改，id 按 s1、s2…、c1、c2…、l1、l2… 编号）：",
@@ -242,6 +248,7 @@ def normalize(case: dict) -> dict:
                 "topic": _s(cl.get("topic")),
                 "points_to": _s(cl.get("points_to")),
                 "key": key is True or _s(key).lower() in ("true", "1", "是", "yes"),
+                "hidden": cl.get("hidden") is True or _s(cl.get("hidden")).lower() in ("true", "1", "是", "yes"),
             }
         )
     c["clues"] = clues
@@ -283,6 +290,8 @@ def blind_view(case: dict) -> str:
                 lines.append(f"  · 被证据识破后承认：关于{l['topic']}，原说法“{l['lie']}”，实际“{l['truth']}”")
     lines += ["", "全部线索："]
     for cl in case["clues"]:
+        if cl.get("hidden"):
+            continue
         where = cl["location"] if cl["source"] == "search" else ("事件" if cl["source"] == "event" else f"{_name(case, cl['holder'])}的证词")
         lines.append(f"- [{where}] {cl['name']}：{cl['text']}")
     if case["event"]["text"]:

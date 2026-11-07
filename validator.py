@@ -55,6 +55,11 @@ def validate(case: dict, diff: Difficulty) -> list[str]:
             errs.append(f"证词线索 {c['id']} 的 holder“{c['holder']}”不是嫌疑人 id。")
         if c["points_to"] and c["points_to"] not in sids:
             errs.append(f"线索 {c['id']} 的 points_to“{c['points_to']}”不是嫌疑人 id。")
+    for c in clues:
+        if c.get("hidden") and c["key"]:
+            errs.append(f"隐藏彩蛋线索 {c['id']} 不能是关键线索（key 应为 false）。")
+        if c.get("hidden") and c["source"] != "testimony":
+            errs.append(f"隐藏彩蛋线索 {c['id']} 的 source 应为 testimony。")
     if not any(c["source"] == "search" for c in clues):
         errs.append("没有任何搜查线索。")
     if not any(c["source"] == "testimony" for c in clues):

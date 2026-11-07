@@ -27,6 +27,12 @@ def _own_timeline(game: dict, sid: str) -> list[str]:
     return [f"{e['time']} 在{e['where']}：{e['what']}" for e in game["case"]["timeline"] if e["who"] == sid]
 
 
+def _pool_item(c: dict) -> str:
+    if c.get("hidden"):
+        return f"{c['id']}（只有侦探的问题明确问到“{c['topic']}”时才说，否则绝口不提）：{c['text']}"
+    return f"{c['id']}（话题：{c['topic'] or c['name']}）：{c['text']}"
+
+
 def npc_prompt(game: dict, s: dict, asker: str, question: str, presented: dict | None = None, broken: list[dict] | None = None) -> str:
     case = game["case"]
     is_culprit = s["id"] == case["truth"]["culprit"]
@@ -63,7 +69,7 @@ def npc_prompt(game: dict, s: dict, asker: str, question: str, presented: dict |
         lines.append("【已经被识破、你已经承认的事】" + "；".join(l["truth"] for l in done))
     pool = engine.testimony_pool(game, s["id"])
     if pool:
-        lines.append("【你可以透露的信息】" + "；".join(f"{c['id']}（话题：{c['topic'] or c['name']}）：{c['text']}" for c in pool))
+        lines.append("【你可以透露的信息】" + "；".join(_pool_item(c) for c in pool))
     claims = game["claims"].get(s["id"], [])
     if claims:
         lines.append("【你已经说过的话】" + "；".join(claims))
@@ -188,7 +194,7 @@ def _card(game: dict, s: dict) -> str:
         lines.append("谎言：" + "；".join(f"关于{l['topic']}，他会说：{l['lie']}" for l in lies))
     pool = engine.testimony_pool(game, s["id"])
     if pool:
-        lines.append("可以透露的信息：" + "；".join(f"{c['id']}（话题：{c['topic'] or c['name']}）：{c['text']}" for c in pool))
+        lines.append("可以透露的信息：" + "；".join(_pool_item(c) for c in pool))
     claims = game["claims"].get(s["id"], [])
     if claims:
         lines.append("已经说过的话：" + "；".join(claims))
@@ -232,3 +238,44 @@ def parse_confront(text: str, a: dict, b: dict) -> dict:
         "claim_a": str(d.get("claim_a") or "").strip()[:30],
         "claim_b": str(d.get("claim_b") or "").strip()[:30],
     }
+
+
+# ---------------------------------------------------------------- 私下推理
+PRIVATE_SYSTEM = "你是推理游戏的裁判。对照真相判断一名玩家私下提交的推理：凶手是否说对、动机和手法是否大致说中。只输出 JSON。"
+
+
+def private_prompt(game: dict, text: str) -> str:
+    case = game["case"]
+    cul = engine.suspect(game, case["truth"]["culprit"])
+    names = "、".join(s["name"] for s in engine.suspects(game))
+    return (
+        f"嫌疑人：{names}\n真凶：{cul['name'] if cul else ''}\n真实动机：{case['truth']['motive']}\n真实手法：{case['truth']['method']}\n\n"
+        f"玩家的推理：{text}\n\n"
+        '输出：{"culprit": true或false, "motive": true或false, "method": true或false}'
+    )
+
+
+def parse_private(text: str) -> tuple[bool, bool, bool]:
+    try:
+        d = parse_json(text)
+    except Exception:
+        return False, False, False
+    def b(v):
+        return v is True or str(v).strip().lower() in ("true", "1", "是", "yes")
+    return b(d.get("culprit")), b(d.get("motive")), b(d.get("method"))
+
+
+# ---------------------------------------------------------------- 自定义题材审核
+REVIEW_SYSTEM = """你是群聊推理游戏的内容审核员。判断玩家提出的“自定义案件题材”是否可以用来生成一个虚构的推理故事。
+不可以的情况：涉及未成年人受害或任何与未成年人相关的性内容；色情或性暴力；现实中真实存在的人物（明星、政治人物、群友真名等）；真实的政治事件、恐怖袭击、民族宗教仇恨；要求详细描写现实可操作的犯罪方法。
+普通的悬疑、犯罪、历史、科幻、奇幻、校园（成年大学生）、职场题材都可以。只输出 JSON：{"ok": true或false, "reason": "不通过时的简短原因"}"""
+
+
+def parse_review(text: str) -> tuple[bool, str]:
+    try:
+        d = parse_json(text)
+    except Exception:
+        return False, "审核结果无法解析"
+    ok = d.get("ok")
+    ok = ok is True or str(ok).strip().lower() in ("true", "1", "是", "yes")
+    return ok, str(d.get("reason") or "").strip()

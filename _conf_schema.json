@@ -63,5 +63,64 @@
     "description": "投票时长（秒）",
     "type": "int",
     "default": 60
+  },
+  "image_mode": {
+    "description": "开场卷宗、线索墙、结案报告发图片",
+    "type": "bool",
+    "default": true,
+    "hint": "由 AstrBot 的文转图服务渲染，失败时自动改发文字。/案件 卷宗 文字 可以临时看文字版。"
+  },
+  "dashscope_api_key": {
+    "description": "开场插画：阿里云百炼 API Key",
+    "type": "string",
+    "default": "",
+    "hint": "填写后每局开场额外生成一张氛围插画（通义 Qwen 生图）。在阿里云百炼控制台创建 API Key。留空则不生成。"
+  },
+  "image_model": {
+    "description": "插画模型",
+    "type": "string",
+    "default": "qwen-image",
+    "hint": "百炼文生图模型名，如 qwen-image、wanx2.1-t2i-turbo。"
+  },
+  "image_size": {
+    "description": "插画尺寸",
+    "type": "string",
+    "default": "1328*1328",
+    "options": [
+      "1328*1328",
+      "1664*928",
+      "928*1664",
+      "1472*1140"
+    ],
+    "hint": "qwen-image 支持的尺寸；换用其他模型时按该模型文档填写。"
+  },
+  "allow_custom": {
+    "description": "允许自定义题材",
+    "type": "bool",
+    "default": true,
+    "hint": "/案件 开局 自定义 描述。会先过关键词与模型审核，不允许出现群友名字。"
+  },
+  "disabled_themes": {
+    "description": "关闭的题材",
+    "type": "list",
+    "default": [],
+    "hint": "填题材名或关键词，如 太空站、民宿。随机开局时不会抽到。"
+  },
+  "disabled_tricks": {
+    "description": "关闭的诡计",
+    "type": "list",
+    "default": [],
+    "hint": "填诡计名中的关键词，如 延迟发作、密室。"
+  },
+  "daily_limit": {
+    "description": "每群每日开局上限",
+    "type": "int",
+    "default": 0,
+    "hint": "0 表示不限制。重玩和悬案之夜也计入。"
+  },
+  "library_min_stars": {
+    "description": "进入精品案件库的平均星级",
+    "type": "float",
+    "default": 4.0
   }
 }
