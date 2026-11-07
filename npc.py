@@ -159,3 +159,76 @@ WRONG_SYSTEM = "你是推理游戏的旁白。侦探们指认错了人，真凶�
 def wrong_prompt(game: dict, accused: dict) -> str:
     case = game["case"]
     return f"案件：{case['title']}。被错误指认的人：{accused['name']}（{accused['identity']}），他的秘密：{accused['secret']}。真凶的手法：{case['truth']['method']}。"
+
+
+# ---------------------------------------------------------------- 对质
+CONFRONT_SYSTEM = """你在群聊推理游戏里同时扮演两名嫌疑人，让他们当着侦探的面对质。
+规则：
+1. 写 4~6 句两人你来我往的对话，每句不超过 50 字，保持各自的性格与说话方式，可以带神态动作（放在括号里）。
+2. 每个人只说自己知道的事，按各自的谎言说话，除非提示里写明谎言当场被戳穿——那样他必须改口承认。
+3. 不能与他们已经说过的话矛盾（被戳穿后改口除外）。凶手绝不承认作案。
+4. 对质时如果话题碰到了某人“可以透露的信息”，他可以说出来，并把编号写进 reveal。
+只输出 JSON：{"lines": [{"who": "名字", "say": "台词"}], "reveal": ["线索编号"], "claim_a": "第一个人的关键说法，十五字以内", "claim_b": "第二个人的关键说法，十五字以内"}"""
+
+
+def _card(game: dict, s: dict) -> str:
+    is_culprit = s["id"] == game["case"]["truth"]["culprit"]
+    lines = [
+        f"【{s['name']}】{s['identity']}。性格：{s['personality']}。说话方式：{s['speech']}。",
+        f"对外行踪说法：{s['alibi']}",
+        f"秘密（不愿说）：{s['secret']}",
+        f"知道的关于别人的事：{s['knows'] or '无'}",
+    ]
+    own = _own_timeline(game, s["id"])
+    if own:
+        lines.append("当晚真实做过的事：" + "；".join(own))
+    lines.append("他是凶手，绝不承认作案。" if is_culprit else "他不是凶手。")
+    lies = [l for l in s["lies"] if l["id"] not in game["broken"]]
+    if lies:
+        lines.append("谎言：" + "；".join(f"关于{l['topic']}，他会说：{l['lie']}" for l in lies))
+    pool = engine.testimony_pool(game, s["id"])
+    if pool:
+        lines.append("可以透露的信息：" + "；".join(f"{c['id']}（话题：{c['topic'] or c['name']}）：{c['text']}" for c in pool))
+    claims = game["claims"].get(s["id"], [])
+    if claims:
+        lines.append("已经说过的话：" + "；".join(claims))
+    return "\n".join(lines)
+
+
+def confront_prompt(game: dict, a: dict, b: dict, topic: str, broken: list[tuple[dict, dict]]) -> str:
+    case = game["case"]
+    lines = [
+        f"【案件】{case['title']}。受害人{case['victim']['name']}，{case['victim']['fate']}",
+        "",
+        _card(game, a),
+        "",
+        _card(game, b),
+        "",
+        f"【对质话题】{topic or '案发当晚各自的行踪和说法'}",
+    ]
+    for s, l in broken:
+        c = engine.clue(game, l["broken_by"])
+        lines.append(f"【当场戳穿】对方拿出了侦探已掌握的证据“{c['name'] if c else ''}”，{s['name']}关于“{l['topic']}”的谎言（原来说：{l['lie']}）被戳穿，必须改口承认：{l['truth']}")
+    lines.append(f"对话由{a['name']}先开口。")
+    return "\n".join(lines)
+
+
+def parse_confront(text: str, a: dict, b: dict) -> dict:
+    try:
+        d = parse_json(text)
+    except Exception:
+        body = (text or "").strip()[:300] or "……"
+        return {"lines": [(a["name"], body)], "reveal": [], "claim_a": "", "claim_b": ""}
+    lines = []
+    for it in d.get("lines") or []:
+        if isinstance(it, dict) and str(it.get("say") or "").strip():
+            lines.append((str(it.get("who") or "").strip() or "？", str(it["say"]).strip()))
+    rv = d.get("reveal") or []
+    if isinstance(rv, str):
+        rv = [rv]
+    return {
+        "lines": lines[:8] or [(a["name"], "……")],
+        "reveal": [str(x).strip() for x in rv if str(x).strip()],
+        "claim_a": str(d.get("claim_a") or "").strip()[:30],
+        "claim_b": str(d.get("claim_b") or "").strip()[:30],
+    }

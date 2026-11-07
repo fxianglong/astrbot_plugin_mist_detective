@@ -4,7 +4,7 @@ import time
 from pathlib import Path
 
 from astrbot.api import AstrBotConfig, logger
-from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.star import Context, Star, StarTools, register
 
 from . import engine, npc
@@ -25,7 +25,9 @@ HELP = """🕯 雾夜侦探社 · AI 推理游戏
   /审讯 名字 问题　　例：/审讯 沈先生 你昨晚戌时在哪
   /搜查 地点　　　　例：/搜查 厨房
   /出示 线索编号 名字　例：/出示 c3 柳三娘
+  /对质 名字 名字 话题　例：/对质 柳三娘 赵铁 戌时你们在哪
 结案：/指认 名字 动机和手法（说中动机、手法有额外分）
+  群里多人参与时发起投票，/赞成 或 /反对，过半通过
 其他：/案件 卷宗｜/提示（扣 5 分）｜/笔记 内容｜/案件 排行｜/案件 结束 确认"""
 
 
@@ -33,7 +35,7 @@ class GenFailed(Exception):
     pass
 
 
-@register(PLUGIN_NAME, "fxianglong", "雾夜侦探社：AI 现场生成剧本，群友一起审讯、搜证、指认真凶的推理游戏", "0.1.0")
+@register(PLUGIN_NAME, "fxianglong", "雾夜侦探社：AI 现场生成剧本，群友一起审讯、搜证、对质、投票指认真凶的推理游戏", "0.2.0")
 class MistDetective(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -261,6 +263,15 @@ class MistDetective(Star):
             return None, "行动点已经用完了，现在只能 /指认 名字。"
         if event.unified_msg_origin in self._busy:
             return None, "正在处理上一个行动，请稍等。"
+        if game.get("vote"):
+            if time.time() < game["vote"]["deadline"]:
+                return None, "正在投票指认中，请先 /赞成 或 /反对。"
+            self._busy.add(event.unified_msg_origin)
+            try:
+                texts = await self._settle_vote(event.unified_msg_origin, game, force=True)
+            finally:
+                self._busy.discard(event.unified_msg_origin)
+            return None, "\n\n".join(texts or []) + "\n（上一轮投票已结算，请重新发送指令）"
         return game, ""
 
     async def _breakdown(self, umo: str, game: dict, s: dict, uid: str) -> str:
@@ -427,7 +438,107 @@ class MistDetective(Star):
         self.storage.save(event.unified_msg_origin, game)
         yield event.plain_result("📝 已记下。发 /案件 卷宗 可以看到所有笔记。")
 
+    # ------------------------------------------------------------ 指令：对质
+    @filter.command("对质", alias={"当面对质"})
+    async def confront(self, event: AstrMessageEvent):
+        umo = event.unified_msg_origin
+        game, msg = await self._act_guard(event)
+        if not game:
+            yield event.plain_result(msg)
+            return
+        a, rest = engine.split_target(game, self._args(event, "对质", "当面对质"))
+        b, topic = engine.split_target(game, rest) if a else (None, "")
+        if not a or not b or a["id"] == b["id"]:
+            yield event.plain_result(f"让谁和谁对质？{self._suspect_list(game)}\n例：/对质 柳三娘 赵铁 戌时你们各自在哪")
+            return
+        uid, name = self._who(event)
+        broken = engine.confront_breaks(game, a["id"], b["id"])
+        self._busy.add(umo)
+        try:
+            try:
+                raw = await self._llm("npc", umo, npc.confront_prompt(game, a, b, topic, broken), npc.CONFRONT_SYSTEM, self._cfg_int("npc_timeout", 60))
+                out = npc.parse_confront(raw, a, b)
+            except Exception as e:
+                logger.warning(f"[侦探社] 对质调用失败：{e}")
+                yield event.plain_result(f"（{a['name']}和{b['name']}互相瞪着，谁也不肯先开口）模型调用失败，本次不消耗行动点。")
+                return
+            engine.touch(game, uid, name)
+            engine.mark_broken(game, [l for _, l in broken], uid)
+            liars = {s["id"] for s, _ in broken}
+            crashed = []
+            for s in (a, b):
+                if engine.add_pressure(game, s["id"], 25 if s["id"] in liars else 8):
+                    crashed.append(s)
+            new = engine.accept_reveal(game, a["id"], out["reveal"], uid) + engine.accept_reveal(game, b["id"], out["reveal"], uid)
+            for s, cl in ((a, out["claim_a"]), (b, out["claim_b"])):
+                engine.record(game, s["id"], name, f"（与{(b if s is a else a)['name']}对质）{topic}", "", cl)
+            lines = [f"⚔️ {name}让{a['name']}和{b['name']}当面对质" + (f"：{topic}" if topic else "")]
+            lines += [f"{w}：{t}" for w, t in out["lines"]]
+            for s, l in broken:
+                lines.append(f"💡 当面戳穿！{s['name']}承认：{l['truth']}")
+            lines.append(f"紧张度　{a['name']} {engine.pressure_bar(game['pressure'][a['id']])}　{b['name']} {engine.pressure_bar(game['pressure'][b['id']])}")
+            if new:
+                lines.append("📌 新线索：\n" + "\n".join(engine.clue_line(c) for c in new))
+            for s in crashed:
+                lines.append(await self._breakdown(umo, game, s, uid))
+            lines += engine.spend(game)
+            lines.append(engine.status_line(game))
+            self.storage.save(umo, game)
+            yield event.plain_result("\n".join(lines))
+        finally:
+            self._busy.discard(umo)
+
     # ------------------------------------------------------------ 指令：指认
+    async def _do_accuse(self, umo: str, game: dict, s: dict, reasoning: str, uid: str, name: str) -> list[str]:
+        """执行指认并返回要发出的消息；结案时归档。调用方负责加 busy。"""
+        case = game["case"]
+        if s["id"] == case["truth"]["culprit"]:
+            motive_ok = method_ok = False
+            comment = ""
+            if reasoning:
+                try:
+                    motive_ok, method_ok, comment = npc.parse_judge(await self._llm("npc", umo, npc.judge_prompt(game, reasoning), npc.JUDGE_SYSTEM, 60))
+                except Exception:
+                    pass
+            engine.credit(game, uid, engine.PTS_ACCUSE)
+            score = engine.case_score(game, True, motive_ok, method_ok)
+            try:
+                confess = await self._llm("npc", umo, npc.confess_prompt(game), npc.CONFESS_SYSTEM, 90)
+            except Exception:
+                confess = ""
+            head = [f"⚖️ {name}指认：{s['name']}！", "—— 正确，真凶就是 TA。"]
+            if reasoning:
+                head.append(f"动机{'✅' if motive_ok else '❌'}　手法{'✅' if method_ok else '❌'}" + (f"　{comment}" if comment else ""))
+            else:
+                head.append("（没有说明动机和手法，只拿凶手分。下次可以 /指认 名字 后面接上你的推理）")
+            if confess:
+                head += ["", f"🗣 {s['name']}：{confess}"]
+            self.storage.finish(umo, game, "solved", score)
+            return ["\n".join(head), engine.truth_text(game) + "\n\n" + engine.scoreboard(game, score)]
+        game["wrong"].append(s["id"])
+        if len(game["wrong"]) < engine.MAX_WRONG and not game["final"]:
+            self.storage.save(umo, game)
+            return [
+                f"⚖️ {name}指认：{s['name']}！\n{s['name']}据理力争，现有的证据不足以定罪——TA 不是真凶。\n本案扣 5 分，还剩 {engine.MAX_WRONG - len(game['wrong'])} 次指认机会。\n{engine.status_line(game)}"
+            ]
+        try:
+            after = await self._llm("npc", umo, npc.wrong_prompt(game, s), npc.WRONG_SYSTEM, 60)
+        except Exception:
+            after = ""
+        self.storage.finish(umo, game, "failed", 0)
+        text = f"⚖️ {name}指认：{s['name']}！\n这是一桩错案。" + (f"\n\n{after}" if after else "")
+        return [text, engine.truth_text(game) + "\n\n" + engine.scoreboard(game, 0)]
+
+    def _vote_on(self, event: AstrMessageEvent, game: dict) -> bool:
+        if not bool(self.config.get("vote_accuse", True)):
+            return False
+        try:
+            if event.is_private_chat():
+                return False
+        except Exception:
+            pass
+        return len(game["players"]) >= 2
+
     @filter.command("指认", alias={"指控", "破案"})
     async def accuse(self, event: AstrMessageEvent):
         umo = event.unified_msg_origin
@@ -441,50 +552,94 @@ class MistDetective(Star):
             return
         uid, name = self._who(event)
         engine.touch(game, uid, name)
-        case = game["case"]
+        if self._vote_on(event, game):
+            secs = max(15, self._cfg_int("vote_seconds", 60))
+            vote = engine.start_vote(game, s["id"], uid, name, reasoning, secs)
+            self.storage.save(umo, game)
+            asyncio.create_task(self._vote_timer(umo, vote["id"], secs))
+            n = len(game["players"])
+            yield event.plain_result(
+                f"🗳 {name}提议指认：{s['name']}！"
+                + (f"\n推理：{reasoning}" if reasoning else "")
+                + f"\n请参与本案的 {n} 位侦探投票：/赞成 或 /反对。{secs} 秒后结算，过半赞成即执行（提议人已算赞成）。"
+            )
+            return
         self._busy.add(umo)
         try:
-            if s["id"] == case["truth"]["culprit"]:
-                motive_ok = method_ok = False
-                comment = ""
-                if reasoning:
-                    try:
-                        motive_ok, method_ok, comment = npc.parse_judge(await self._llm("npc", umo, npc.judge_prompt(game, reasoning), npc.JUDGE_SYSTEM, 60))
-                    except Exception:
-                        pass
-                engine.credit(game, uid, engine.PTS_ACCUSE)
-                score = engine.case_score(game, True, motive_ok, method_ok)
-                try:
-                    confess = await self._llm("npc", umo, npc.confess_prompt(game), npc.CONFESS_SYSTEM, 90)
-                except Exception:
-                    confess = ""
-                head = [f"⚖️ {name}指认：{s['name']}！", "—— 正确，真凶就是 TA。"]
-                if reasoning:
-                    head.append(f"动机{'✅' if motive_ok else '❌'}　手法{'✅' if method_ok else '❌'}" + (f"　{comment}" if comment else ""))
-                else:
-                    head.append("（没有说明动机和手法，只拿凶手分。下次可以 /指认 名字 后面接上你的推理）")
-                if confess:
-                    head += ["", f"🗣 {s['name']}：{confess}"]
-                self.storage.finish(umo, game, "solved", score)
-                yield event.plain_result("\n".join(head))
-                yield event.plain_result(engine.truth_text(game) + "\n\n" + engine.scoreboard(game, score))
-                return
-            game["wrong"].append(s["id"])
-            if len(game["wrong"]) < engine.MAX_WRONG and not game["final"]:
-                self.storage.save(umo, game)
-                yield event.plain_result(
-                    f"⚖️ {name}指认：{s['name']}！\n{s['name']}据理力争，现有的证据不足以定罪——TA 不是真凶。\n本案扣 5 分，还剩 {engine.MAX_WRONG - len(game['wrong'])} 次指认机会。\n{engine.status_line(game)}"
-                )
-                return
-            try:
-                after = await self._llm("npc", umo, npc.wrong_prompt(game, s), npc.WRONG_SYSTEM, 60)
-            except Exception:
-                after = ""
-            self.storage.finish(umo, game, "failed", 0)
-            text = f"⚖️ {name}指认：{s['name']}！\n这是一桩错案。"
-            if after:
-                text += f"\n\n{after}"
-            yield event.plain_result(text)
-            yield event.plain_result(engine.truth_text(game) + "\n\n" + engine.scoreboard(game, 0))
+            for t in await self._do_accuse(umo, game, s, reasoning, uid, name):
+                yield event.plain_result(t)
         finally:
             self._busy.discard(umo)
+
+    async def _settle_vote(self, umo: str, game: dict, force: bool) -> list[str] | None:
+        """结算投票；force=False 时只在票数已经决定结果时结算。返回 None 表示还没结算。"""
+        v = game.get("vote")
+        if not v:
+            return None
+        verdict = engine.vote_verdict(game)
+        if verdict is None and not force:
+            return None
+        game.pop("vote", None)
+        yes, no = len(v["yes"]), len(v["no"])
+        s = engine.suspect(game, v["target"])
+        # 超时时：赞成多于反对、且至少有一人附议才通过，避免一个人的提议在无人理会时直接生效
+        if verdict is True or (verdict is None and yes > no and yes >= 2):
+            texts = await self._do_accuse(umo, game, s, v["reasoning"], v["by"], v["by_name"])
+            return [f"🗳 投票通过（赞成 {yes} / 反对 {no}）"] + texts
+        self.storage.save(umo, game)
+        why = "无人附议" if yes < 2 and no == 0 else f"赞成 {yes} / 反对 {no}"
+        return [f"🗳 投票未通过（{why}），{s['name']}暂不指认。继续调查吧。\n{engine.status_line(game)}"]
+
+    async def _vote_timer(self, umo: str, vote_id: str, secs: int):
+        await asyncio.sleep(secs)
+        while umo in self._busy:
+            await asyncio.sleep(1)
+        game = self.storage.load(umo)
+        if not game or (game.get("vote") or {}).get("id") != vote_id:
+            return
+        self._busy.add(umo)
+        try:
+            texts = await self._settle_vote(umo, game, force=True) or []
+        except Exception as e:
+            logger.error(f"[侦探社] 投票结算失败：{e}")
+            texts = []
+        finally:
+            self._busy.discard(umo)
+        for t in texts:
+            try:
+                await self.context.send_message(umo, MessageChain().message(t))
+            except Exception as e:
+                logger.error(f"[侦探社] 发送投票结果失败：{e}")
+
+    async def _cast(self, event: AstrMessageEvent, agree: bool):
+        umo = event.unified_msg_origin
+        game, msg = await self._need_game(event)
+        if not game:
+            return [msg]
+        if not game.get("vote"):
+            return ["现在没有进行中的投票。"]
+        if umo in self._busy:
+            return ["正在结算，请稍等。"]
+        uid, name = self._who(event)
+        engine.cast_vote(game, uid, name, agree)
+        self._busy.add(umo)
+        try:
+            expired = time.time() >= game["vote"]["deadline"]
+            texts = await self._settle_vote(umo, game, force=expired)
+            if texts is None:
+                self.storage.save(umo, game)
+                v = game["vote"]
+                return [f"🗳 {name}{'赞成' if agree else '反对'}。当前 赞成 {len(v['yes'])} / 反对 {len(v['no'])}"]
+            return texts
+        finally:
+            self._busy.discard(umo)
+
+    @filter.command("赞成", alias={"同意", "支持"})
+    async def vote_yes(self, event: AstrMessageEvent):
+        for t in await self._cast(event, True):
+            yield event.plain_result(t)
+
+    @filter.command("反对", alias={"不同意"})
+    async def vote_no(self, event: AstrMessageEvent):
+        for t in await self._cast(event, False):
+            yield event.plain_result(t)

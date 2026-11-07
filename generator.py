@@ -85,6 +85,7 @@ SCHEMA = """{
     {"id": "c2", "name": "...", "text": "这个人会说出的话或透露的信息", "source": "testimony", "holder": "掌握它的嫌疑人 id", "topic": "问到什么话题时会说", "points_to": "", "key": false}
   ],
   "event": {"text": "第二幕的突发事件，80~150 字，推翻大家的第一印象，并带出新线索", "clues": ["事件带出的线索编号，这些线索 source 写 event"]},
+  "climax": {"text": "第三幕开场的事件，50~100 字，制造紧迫感或新的冲突（如有人试图销毁证据、暴风雪切断灯火、某人突然翻供），不带新的关键线索"},
   "flaws": [{"text": "诡计留下的破绽", "clues": ["能发现它的线索编号"]}],
   "red_herrings": [{"clue": "误导线索编号", "explain": "它的真实解释"}],
   "solution": "推理链：从哪几条线索、经过哪几步推出凶手和手法，3~5 步"
@@ -106,7 +107,7 @@ def gen_prompt(sk: Skeleton, feedback: str = "") -> str:
         "【诡计必须留下的破绽】" + "；".join(sk.trick.flaws) + "。每条破绽都要对应至少一张关键线索。",
         f"【规模】嫌疑人正好 {d.suspects} 个（受害人不算），其中 1 个是凶手；线索 {8 + d.suspects}~{10 + d.suspects * 2} 张；"
         f"至少 {d.key_clues} 张 key=true 且 points_to 为凶手的关键线索；红鲱鱼（指向无辜者的误导线索）{d.red_herrings} 张。",
-        "【结构】三层：表层有一个“看起来最像凶手”的无辜者；中层是各人的秘密与红鲱鱼；深层才是真正的诡计。第二幕事件要推翻表层印象。",
+        "【结构】三层：表层有一个“看起来最像凶手”的无辜者；中层是各人的秘密与红鲱鱼；深层才是真正的诡计。第二幕事件要推翻表层印象，第三幕事件把紧张感推到顶点。",
         "【线索分布】既要有 search（搜查地点得到）也要有 testimony（审讯时嫌疑人说出），event 线索 1~2 张。凶手至少有 1 条能被线索识破的谎言（lies.broken_by）；其他人可以各有 0~2 条谎言。",
         "【时间线】按时间顺序列出 10~16 条，包含凶手作案的真实过程和每个嫌疑人在关键时段的真实位置；同一个人同一时刻只能在一个地方。",
         "",
@@ -254,6 +255,8 @@ def normalize(case: dict) -> dict:
         elif cl["source"] == "event":
             c["event"]["clues"].append(cl["id"])
 
+    cm = c.get("climax") or {}
+    c["climax"] = {"text": _s(cm.get("text")) if isinstance(cm, dict) else _s(cm)}
     c["flaws"] = [
         {"text": _s(f.get("text")), "clues": [_s(x) for x in (f.get("clues") or []) if _s(x)]}
         for f in (c.get("flaws") or [])
