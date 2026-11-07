@@ -20,6 +20,7 @@ PTS_CLUE = 1
 PTS_BREAK_LIE = 8
 PTS_BREAKDOWN = 5
 PTS_ACCUSE = 10
+PTS_EGG = 10
 
 TITLES = [(25, "神探"), (10, "名侦探"), (3, "侦探"), (0, "见习侦探")]
 
@@ -31,13 +32,17 @@ def title_of(solved: int) -> str:
     return "见习侦探"
 
 
-def new_game(case: dict, sk: Skeleton, now: float | None = None) -> dict:
+def new_game(case: dict, sk: Skeleton, now: float | None = None, host: str = "", replay_of: int | None = None) -> dict:
     now = now or time.time()
     plan = list(sk.diff.ap)
     return {
         "case": case,
         "meta": {"theme": sk.theme.key, "theme_name": sk.theme.name, "trick": sk.trick.key, "style": sk.style.key,
-                 "style_name": sk.style.name, "diff": sk.diff.key, "diff_name": sk.diff.name, "seed": sk.seed},
+                 "style_name": sk.style.name, "diff": sk.diff.key, "diff_name": sk.diff.name, "seed": sk.seed,
+                 "replay_of": replay_of},
+        "host": host,
+        "private": {},
+        "eggs": 0,
         "act": 1,
         "ap": plan[0],
         "ap_plan": plan,
@@ -149,6 +154,28 @@ def credit(game: dict, uid: str, pts: int) -> None:
         game["players"][uid]["pts"] += pts
 
 
+def bump(game: dict, uid: str, stat: str) -> None:
+    """个人趣味统计：breaks（问崩几人）、wrongs（指错几次）、quick（第一幕就破案）。"""
+    if uid in game["players"]:
+        p = game["players"][uid]
+        p[stat] = p.get(stat, 0) + 1
+
+
+def badges(rows: list[tuple]) -> dict[str, list[str]]:
+    """排行榜趣味称号。rows: (name, pts, solved, games, breaks, wrongs, quick)"""
+    out: dict[str, list[str]] = {r[0]: [] for r in rows}
+    mb = max((r[4] for r in rows), default=0)
+    mw = max((r[5] for r in rows), default=0)
+    for r in rows:
+        if mb and r[4] == mb:
+            out[r[0]].append("问哭人")
+        if mw and r[5] == mw:
+            out[r[0]].append("冤案制造机")
+        if r[6]:
+            out[r[0]].append("一眼看穿")
+    return out
+
+
 def give_clues(game: dict, ids: list[str], uid: str = "") -> list[dict]:
     """发放线索（去重），返回本次新得到的线索。"""
     out = []
@@ -156,9 +183,11 @@ def give_clues(game: dict, ids: list[str], uid: str = "") -> list[dict]:
         c = clue(game, cid)
         if c and cid not in game["found"]:
             game["found"].append(cid)
+            if c.get("hidden"):
+                game["eggs"] = game.get("eggs", 0) + 1
             if uid:
                 game["found_by"][cid] = uid
-                credit(game, uid, PTS_KEY_CLUE if c["key"] else PTS_CLUE)
+                credit(game, uid, PTS_EGG if c.get("hidden") else PTS_KEY_CLUE if c["key"] else PTS_CLUE)
             out.append(c)
     return out
 
@@ -168,9 +197,12 @@ def search(game: dict, loc: str, uid: str) -> list[dict]:
     return give_clues(game, ids, uid)
 
 
-def testimony_pool(game: dict, sid: str) -> list[dict]:
+def testimony_pool(game: dict, sid: str, with_hidden: bool = True) -> list[dict]:
     """这个人掌握、还没说出来的证词线索。"""
-    return [c for c in game["case"]["clues"] if c["source"] == "testimony" and c["holder"] == sid and c["id"] not in game["found"]]
+    return [
+        c for c in game["case"]["clues"]
+        if c["source"] == "testimony" and c["holder"] == sid and c["id"] not in game["found"] and (with_hidden or not c.get("hidden"))
+    ]
 
 
 def accept_reveal(game: dict, sid: str, ids: list[str], uid: str) -> list[dict]:
@@ -316,12 +348,14 @@ def case_score(game: dict, culprit_ok: bool, motive_ok: bool, method_ok: bool) -
         return 0
     s = 50 + (20 if motive_ok else 0) + (30 if method_ok else 0)
     s -= 5 * game["hints"] + 5 * len(game["wrong"])
-    return max(0, s)
+    s += 5 * game.get("eggs", 0)  # 彩蛋加成，总分不超过 100
+    return max(0, min(100, s))
 
 
 # ---------------------------------------------------------------- 文字
 def clue_line(c: dict) -> str:
-    return f"【{c['id']}】{c['name']}：{c['text']}"
+    egg = "🥚彩蛋 " if c.get("hidden") else ""
+    return f"【{c['id']}】{egg}{c['name']}：{c['text']}"
 
 
 def pressure_bar(v: int) -> str:
@@ -361,7 +395,7 @@ def opening(game: dict) -> str:
         "可搜查：" + "、".join(case["locations"]),
         "",
         "玩法：/审讯 名字 问题｜/搜查 地点｜/出示 线索编号 名字｜/对质 名字 名字 话题｜/指认 名字 动机和手法",
-        "其他：/案件 卷宗（随时查看进度）｜/提示（扣 5 分）｜/笔记 内容",
+        "其他：/案件 卷宗（随时查看进度）｜/提示（扣 5 分）｜/笔记 内容｜私聊我 /推理 内容 提交个人推理",
         status_line(game) + "。每次审讯、搜查、出示、对质消耗 1 点，全群共用。",
     ]
     return "\n".join(lines)
@@ -417,6 +451,9 @@ def truth_text(game: dict) -> str:
         lines.append(f"{e['time']}  {who}｜{e['where']}｜{e['what']}")
     lines += ["", "线索回顾："]
     for c in case["clues"]:
+        if c.get("hidden") and c["id"] not in game["found"]:
+            lines.append("🥚 一个隐藏彩蛋没被发现")
+            continue
         mark = "✅" if c["id"] in game["found"] else "❌"
         star = "★" if c["key"] and c["points_to"] == case["truth"]["culprit"] else ""
         lines.append(f"{mark}{star} {c['name']}")
