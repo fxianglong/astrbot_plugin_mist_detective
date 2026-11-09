@@ -122,5 +122,23 @@
     "description": "进入精品案件库的平均星级",
     "type": "float",
     "default": 4.0
+  },
+  "ap_scale": {
+    "description": "行动点倍率（%）",
+    "type": "int",
+    "default": 100,
+    "hint": "100 为默认；觉得一局太短调高，太拖调低。"
+  },
+  "pressure_scale": {
+    "description": "紧张度增长倍率（%）",
+    "type": "int",
+    "default": 100,
+    "hint": "调高更容易问崩嫌疑人，调低更难。"
+  },
+  "debug_dump": {
+    "description": "保存未通过的档案原文",
+    "type": "bool",
+    "default": true,
+    "hint": "保存在插件数据目录 debug/ 下，最近 20 份，用于排查生成问题。/案件 诊断 查看统计。"
   }
 }

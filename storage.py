@@ -53,6 +53,16 @@ class Storage:
                 umo TEXT NOT NULL,
                 ts REAL NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS gen_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                umo TEXT NOT NULL,
+                ts REAL NOT NULL,
+                combo TEXT NOT NULL,
+                attempts INTEGER NOT NULL,
+                ok INTEGER NOT NULL,
+                secs REAL NOT NULL,
+                reasons TEXT NOT NULL DEFAULT ''
+            );
             CREATE TABLE IF NOT EXISTS subs (
                 umo TEXT PRIMARY KEY,
                 weekday INTEGER NOT NULL,
@@ -161,6 +171,21 @@ class Storage:
             d = {"case": d, "meta": {"theme": row[1], "trick": row[2], "style": row[3], "diff": "normal"}}
         d["origin"] = row[4] or case_id
         return d
+
+    # ------------------------------------------------------------ 生成日志
+    def log_gen(self, umo: str, combo: str, attempts: int, ok: bool, secs: float, reasons: list[str]) -> None:
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO gen_log(umo,ts,combo,attempts,ok,secs,reasons) VALUES(?,?,?,?,?,?,?)",
+                (umo, time.time(), combo, attempts, 1 if ok else 0, secs, json.dumps(reasons, ensure_ascii=False)),
+            )
+            self._db.commit()
+
+    def gen_stats(self, n: int = 30) -> list[tuple]:
+        """最近 n 次生成：(ts, combo, attempts, ok, secs, reasons)"""
+        with self._lock:
+            rows = self._db.execute("SELECT ts, combo, attempts, ok, secs, reasons FROM gen_log ORDER BY id DESC LIMIT ?", (n,)).fetchall()
+        return [(r[0], r[1], r[2], r[3], r[4], json.loads(r[5] or "[]")) for r in rows]
 
     # ------------------------------------------------------------ 开局次数
     def add_start(self, umo: str) -> None:
