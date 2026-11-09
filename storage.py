@@ -63,6 +63,12 @@ class Storage:
                 secs REAL NOT NULL,
                 reasons TEXT NOT NULL DEFAULT ''
             );
+            CREATE TABLE IF NOT EXISTS series (
+                umo TEXT PRIMARY KEY,
+                arc TEXT NOT NULL,
+                chapter INTEGER NOT NULL,
+                done INTEGER NOT NULL DEFAULT 0
+            );
             CREATE TABLE IF NOT EXISTS subs (
                 umo TEXT PRIMARY KEY,
                 weekday INTEGER NOT NULL,
@@ -224,6 +230,25 @@ class Storage:
     def mark_sub(self, umo: str, day: str) -> None:
         with self._lock:
             self._db.execute("UPDATE subs SET last=? WHERE umo=?", (day, umo))
+            self._db.commit()
+
+    # ------------------------------------------------------------ 系列主线
+    def get_series(self, umo: str) -> tuple[str, int, bool] | None:
+        with self._lock:
+            row = self._db.execute("SELECT arc, chapter, done FROM series WHERE umo=?", (umo,)).fetchone()
+        return (row[0], row[1], bool(row[2])) if row else None
+
+    def set_series(self, umo: str, arc: str, chapter: int, done: bool = False) -> None:
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO series(umo,arc,chapter,done) VALUES(?,?,?,?) ON CONFLICT(umo) DO UPDATE SET arc=excluded.arc, chapter=excluded.chapter, done=excluded.done",
+                (umo, arc, chapter, 1 if done else 0),
+            )
+            self._db.commit()
+
+    def reset_series(self, umo: str) -> None:
+        with self._lock:
+            self._db.execute("DELETE FROM series WHERE umo=?", (umo,))
             self._db.commit()
 
     # ------------------------------------------------------------ 私下推理

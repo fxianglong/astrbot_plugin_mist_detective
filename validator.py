@@ -12,7 +12,7 @@ from .library import Difficulty
 TIME_RE = re.compile(r"^\d{2}:\d{2}$")
 
 
-def validate(case: dict, diff: Difficulty) -> list[str]:
+def validate(case: dict, diff: Difficulty, mark: str = "") -> list[str]:
     errs: list[str] = []
     sus = case.get("suspects") or []
     sids = {s["id"] for s in sus}
@@ -117,6 +117,10 @@ def validate(case: dict, diff: Difficulty) -> list[str]:
             at[k] = e["where"]
     if culprit in sids and not any(e["who"] == culprit for e in tl):
         errs.append("时间线里没有凶手的行动。")
+
+    # ---- 系列主线线索
+    if mark and not any(mark in c["name"] or mark in c["text"] for c in clues):
+        errs.append(f"缺少系列主线线索：需要一张名称里带“{mark}”的搜查线索（key=false）。")
 
     # ---- 剧透
     if culprit in sids:

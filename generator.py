@@ -106,7 +106,7 @@ RP_NOTE = (
 )
 
 
-def gen_prompt(sk: Skeleton, feedback: str = "", rp: bool = False) -> str:
+def gen_prompt(sk: Skeleton, feedback: str = "", rp: bool = False, extra: str = "") -> str:
     d = sk.diff
     lines = [
         "请设计一个案件。",
@@ -131,6 +131,8 @@ def gen_prompt(sk: Skeleton, feedback: str = "", rp: bool = False) -> str:
     ]
     if rp:
         lines.insert(-2, RP_NOTE)
+    if extra:
+        lines.insert(-2, extra)
     if feedback:
         lines += ["", "上一次生成的档案没有通过检查，请修正这些问题后重新完整输出：", feedback]
     return "\n".join(lines)

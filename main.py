@@ -9,7 +9,7 @@ from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.star import Context, Star, StarTools, register
 
-from . import engine, npc, render, roleplay
+from . import engine, npc, render, roleplay, series
 from .generator import GEN_SYSTEM, SOLVE_SYSTEM, Skeleton, Truncated, gen_prompt, normalize, parse_json, pick_skeleton, solve_prompt, strip_think
 from .illustrate import Illustrator, art_prompt
 from .library import (
@@ -46,6 +46,7 @@ HELP = """🕯 雾夜侦探社 · AI 推理游戏
   私聊我 /推理 内容，提交只有自己知道的推理，结案时单独计分
 其他：/案件 卷宗｜/提示（扣 5 分）｜/笔记 内容｜/案件 推进（局长）
 案件库：/案件 评分 1-5｜/案件 案件库｜/案件 重玩 编号
+主线：/案件 主线（《灰蛾》五章连续剧情）
 角色扮演：/案件 角色扮演 → /加入 → /案件 发车；局中 /搜查 /公开 /投票，私聊 /我的角色
 排行：/案件 排行｜悬案之夜：/案件 订阅 周五 21:00｜/案件 退订｜生成诊断：/案件 诊断
 放弃：/案件 结束 确认"""
@@ -60,7 +61,7 @@ class GenFailed(Exception):
 Items = list[tuple[str, str]]  # [("text", 文本) | ("image", 本地路径)]
 
 
-@register(PLUGIN_NAME, "fxianglong", "雾夜侦探社：AI 现场生成剧本的群聊推理游戏", "0.4.0")
+@register(PLUGIN_NAME, "fxianglong", "雾夜侦探社：AI 现场生成剧本的群聊推理游戏", "0.5.0")
 class MistDetective(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -223,7 +224,7 @@ class MistDetective(Star):
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[侦探社] 保存调试文件失败：{e}")
 
-    async def _generate(self, umo: str, sk, rp: bool = False) -> dict:
+    async def _generate(self, umo: str, sk, rp: bool = False, extra: str = "", mark: str = "") -> dict:
         timeout = self._cfg_int("gen_timeout", 240)
         attempts = max(1, self._cfg_int("gen_attempts", 3))
         verify = bool(self.config.get("verify_solvable", True))
@@ -234,7 +235,7 @@ class MistDetective(Star):
         for i in range(attempts):
             t1 = time.time()
             try:
-                text = await self._llm("gen", umo, gen_prompt(sk, feedback, rp), GEN_SYSTEM, timeout)
+                text = await self._llm("gen", umo, gen_prompt(sk, feedback, rp, extra), GEN_SYSTEM, timeout)
             except asyncio.TimeoutError:
                 reasons.append(f"超时（{timeout} 秒）")
                 logger.warning(f"[侦探社] 生成 {combo} 第 {i + 1} 次：超时")
@@ -258,7 +259,7 @@ class MistDetective(Star):
                 self._dump("badjson", text)
                 logger.warning(f"[侦探社] 生成 {combo} 第 {i + 1} 次：解析失败 {e}")
                 continue
-            errs = validate(case, sk.diff)
+            errs = validate(case, sk.diff, mark)
             if errs:
                 reasons.append("校验：" + errs[0])
                 feedback = "\n".join(f"- {e}" for e in errs[:12])
@@ -325,21 +326,31 @@ class MistDetective(Star):
         path = await self.illustrator.draw(prompt, f"{int(time.time())}_{m['seed']}")
         return [("image", path)] if path else []
 
-    async def _start_case(self, umo: str, sk: Skeleton, host: str, host_name: str = "") -> tuple[dict | None, Items]:
-        """生成并保存新对局。返回 (game, 开场消息)；失败时 game 为 None。"""
+    async def _start_case(self, umo: str, sk: Skeleton, host: str, host_name: str = "", ser: dict | None = None) -> tuple[dict | None, Items]:
+        """生成并保存新对局。返回 (game, 开场消息)；失败时 game 为 None。ser：系列主线 {arc, chapter}。"""
+        extra = mark = ""
+        if ser:
+            arc = series.arc_of(ser["arc"])
+            extra, mark = series.chapter(arc, ser["chapter"]).inject, arc.mark
         try:
-            case = await self._generate(umo, sk)
+            case = await self._generate(umo, sk, extra=extra, mark=mark)
         except GenFailed as e:
             return None, [("text", f"这次没能写出一桩靠谱的案子（{e}）。再发一次 /案件 开局 试试。")]
         except Exception as e:
             logger.error(f"[侦探社] 生成失败：{e}")
             return None, [("text", f"生成案件时出错：{e}")]
         game = self._tune(engine.new_game(case, sk, host=host))
+        if ser:
+            game["series"] = ser
         if host:  # 局长算作本案侦探，可以私聊提交推理、参与投票
             game["players"][host] = {"name": host_name or host, "pts": 0, "actions": 0}
         self.storage.save(umo, game)
         self.storage.add_start(umo)
-        return game, await self._opening_items(umo, game)
+        prefix = ""
+        if ser:
+            arc = series.arc_of(ser["arc"])
+            prefix = f"🦋 主线《{arc.name}》第 {ser['chapter']} 章 · {series.chapter(arc, ser['chapter']).title}\n"
+        return game, await self._opening_items(umo, game, prefix=prefix)
 
     async def _review_custom(self, umo: str, desc: str) -> str:
         """自定义题材审核，返回不通过的原因；空字符串表示通过。"""
@@ -609,6 +620,85 @@ class MistDetective(Star):
         self.storage.add_start(umo)
         for r in self._emit(event, await self._opening_items(umo, game, prefix=f"📚 重玩精品案件 #{d['origin']}\n")):
             yield r
+
+    # ------------------------------------------------------------ 指令：系列主线
+    @case_group.command("主线", alias={"系列"})
+    async def series_cmd(self, event: AstrMessageEvent):
+        umo = event.unified_msg_origin
+        words = self._args(event, "案件").split()[1:]
+        sub = words[0] if words else ""
+        st = self.storage.get_series(umo)
+        if sub in ("开始", "加入"):
+            if st and not st[2]:
+                yield event.plain_result(f"本群已经在主线第 {st[1]} 章了。发 /案件 主线 下一章 继续，或 /案件 主线 重置 确认 从头开始。")
+                return
+            self.storage.set_series(umo, series.DEFAULT_ARC, 1)
+            arc = series.arc_of(series.DEFAULT_ARC)
+            yield event.plain_result(series.status_text(arc, 1, False))
+            return
+        if sub == "重置":
+            if "确认" not in words:
+                yield event.plain_result("确定清空主线进度吗？发 /案件 主线 重置 确认")
+                return
+            self.storage.reset_series(umo)
+            yield event.plain_result("主线进度已清空。")
+            return
+        if sub in ("下一章", "继续", "开局"):
+            if not st:
+                yield event.plain_result("本群还没开始主线。发 /案件 主线 开始。")
+                return
+            if st[2]:
+                yield event.plain_result("《灰蛾》已经完结了。发 /案件 主线 重置 确认 可以重玩。")
+                return
+            game, _ = self._active(umo)
+            if game or umo in self._busy:
+                yield event.plain_result("本群还有进行中的案件，先把它结了吧。")
+                return
+            if msg := self._limit_msg(umo):
+                yield event.plain_result(msg)
+                return
+            arc = series.arc_of(st[0])
+            ch = series.chapter(arc, st[1])
+            style = match_style(str(self.config.get("default_style", "本格") or "本格")) or STYLES["honkaku"]
+            if style.key == "comedy":
+                style = STYLES["honkaku"]  # 主线需要真正的命案
+            sk = pick_skeleton(self._rng, THEMES.get(ch.theme or ""), style, None, TRICKS.get(ch.trick or ""), avoid=self.storage.recent_combos(umo))
+            uid, uname = self._who(event)
+            self._busy.add(umo)
+            try:
+                yield event.plain_result(f"🦋 主线《{arc.name}》第 {ch.no} 章 · {ch.title}\n又一只纸蛾落下了……卷宗整理中，大约需要一两分钟。")
+                game, items = await self._start_case(umo, sk, host=uid, host_name=uname, ser={"arc": arc.key, "chapter": ch.no})
+                for r in self._emit(event, items):
+                    yield r
+                if game:
+                    for r in self._emit(event, await self._illustration(game)):
+                        yield r
+            finally:
+                self._busy.discard(umo)
+            return
+        if not st:
+            arc = series.arc_of(series.DEFAULT_ARC)
+            yield event.plain_result(f"🦋 主线《{arc.name}》（共 {len(arc.chapters)} 章）\n{arc.intro}\n\n发 /案件 主线 开始 加入主线；之后每章用 /案件 主线 下一章 开局，破案才能解锁下一章。")
+            return
+        yield event.plain_result(series.status_text(series.arc_of(st[0]), st[1], st[2]))
+
+    def _series_after(self, umo: str, game: dict, solved: bool) -> list[str]:
+        ser = game.get("series")
+        if not ser:
+            return []
+        arc = series.arc_of(ser["arc"])
+        ch = series.chapter(arc, ser["chapter"])
+        if not solved:
+            return ["", f"🦋 纸蛾从窗缝飞走了……主线第 {ch.no} 章没能破解。发 /案件 主线 下一章 重新挑战（会是一桩新的案子）。"]
+        last = ch.no >= len(arc.chapters)
+        self.storage.set_series(umo, arc.key, ch.no if last else ch.no + 1, done=last)
+        lines = ["", f"🦋 主线《{arc.name}》第 {ch.no} 章 · 解锁的真相：", ch.fragment]
+        if last:
+            lines += ["", arc.epilogue]
+        else:
+            nxt = series.chapter(arc, ch.no + 1)
+            lines.append(f"下一章：{nxt.title}。准备好了就发 /案件 主线 下一章。")
+        return lines
 
     # ------------------------------------------------------------ 指令：角色扮演
     def _lobby(self, umo: str) -> dict | None:
@@ -1247,6 +1337,7 @@ class MistDetective(Star):
             if confess:
                 head += ["", f"🗣 {s['name']}：{confess}"]
             head += [""] + await self._settle_private(umo, game) if game.get("private") else []
+            head += self._series_after(umo, game, True)
             self.storage.finish(umo, game, "solved", score)
             return [("text", "\n".join(head).strip())] + await self._truth_items(umo, game, score, "solved", confess)
         game["wrong"].append(s["id"])
@@ -1264,6 +1355,7 @@ class MistDetective(Star):
         priv = await self._settle_private(umo, game)
         self.storage.finish(umo, game, "failed", 0)
         text = f"⚖️ {name}指认：{s['name']}！\n这是一桩错案。" + (f"\n\n{after}" if after else "") + ("\n\n" + "\n".join(priv) if priv else "")
+        text += "\n".join(self._series_after(umo, game, False))
         return [("text", text)] + await self._truth_items(umo, game, 0, "failed")
 
     def _vote_on(self, event: AstrMessageEvent, game: dict) -> bool:
