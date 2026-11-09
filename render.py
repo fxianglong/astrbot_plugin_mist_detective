@@ -198,6 +198,13 @@ def palette(game: dict) -> dict:
     return PALETTES.get(game["meta"]["theme"], PALETTES["custom"])
 
 
+def _player(game: dict, sid: str) -> str:
+    for uid, x in (game.get("roles") or {}).items():
+        if x == sid:
+            return game["players"].get(uid, {}).get("name", uid)
+    return ""
+
+
 def _avatar(i: int) -> str:
     return AVATAR[i % len(AVATAR)]
 
@@ -211,7 +218,8 @@ def opening_data(game: dict) -> dict:
         "intro": case["intro"],
         "victim": case["victim"],
         "suspects": [
-            {"no": i, "name": s["name"], "identity": s["identity"], "public": s["public"], "initial": s["name"][:1], "color": _avatar(i - 1)}
+            {"no": i, "name": s["name"], "identity": s["identity"] + (f" · 扮演：{_player(game, s['id'])}" if game.get("mode") == "rp" else ""),
+             "public": s["public"], "initial": s["name"][:1], "color": _avatar(i - 1)}
             for i, s in enumerate(engine.suspects(game), 1)
         ],
         "locations": case["locations"],

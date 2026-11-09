@@ -9,7 +9,7 @@ from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.star import Context, Star, StarTools, register
 
-from . import engine, npc, render
+from . import engine, npc, render, roleplay
 from .generator import GEN_SYSTEM, SOLVE_SYSTEM, Skeleton, Truncated, gen_prompt, normalize, parse_json, pick_skeleton, solve_prompt, strip_think
 from .illustrate import Illustrator, art_prompt
 from .library import (
@@ -46,7 +46,8 @@ HELP = """🕯 雾夜侦探社 · AI 推理游戏
   私聊我 /推理 内容，提交只有自己知道的推理，结案时单独计分
 其他：/案件 卷宗｜/提示（扣 5 分）｜/笔记 内容｜/案件 推进（局长）
 案件库：/案件 评分 1-5｜/案件 案件库｜/案件 重玩 编号
-排行：/案件 排行｜悬案之夜：/案件 订阅 周五 21:00｜/案件 退订
+角色扮演：/案件 角色扮演 → /加入 → /案件 发车；局中 /搜查 /公开 /投票，私聊 /我的角色
+排行：/案件 排行｜悬案之夜：/案件 订阅 周五 21:00｜/案件 退订｜生成诊断：/案件 诊断
 放弃：/案件 结束 确认"""
 
 CUSTOM_BLOCK = re.compile(r"未成年|小学生|初中生|幼儿|儿童|小孩|萝莉|正太|色情|性侵|强奸|乱伦|恐怖袭击|炸弹|制毒|贩毒")
@@ -78,6 +79,7 @@ class MistDetective(Star):
             data_dir / "art",
         )
         self._busy: set[str] = set()
+        self._lobbies: dict[str, dict] = {}  # 角色扮演报名：umo → {host, players{uid:name}, theme, style, created}
         self._rng = random.Random()
         self._task = asyncio.create_task(self._scheduler_loop())
 
@@ -221,7 +223,7 @@ class MistDetective(Star):
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[侦探社] 保存调试文件失败：{e}")
 
-    async def _generate(self, umo: str, sk) -> dict:
+    async def _generate(self, umo: str, sk, rp: bool = False) -> dict:
         timeout = self._cfg_int("gen_timeout", 240)
         attempts = max(1, self._cfg_int("gen_attempts", 3))
         verify = bool(self.config.get("verify_solvable", True))
@@ -232,7 +234,7 @@ class MistDetective(Star):
         for i in range(attempts):
             t1 = time.time()
             try:
-                text = await self._llm("gen", umo, gen_prompt(sk, feedback), GEN_SYSTEM, timeout)
+                text = await self._llm("gen", umo, gen_prompt(sk, feedback, rp), GEN_SYSTEM, timeout)
             except asyncio.TimeoutError:
                 reasons.append(f"超时（{timeout} 秒）")
                 logger.warning(f"[侦探社] 生成 {combo} 第 {i + 1} 次：超时")
@@ -307,9 +309,12 @@ class MistDetective(Star):
                 if prefix:
                     items.append(("text", prefix.strip()))
                 items.append(("image", path))
-                items.append(("text", f"《{game['case']['title']}》开局！{engine.status_line(game)}。\n/案件 帮助 查看全部指令；私聊我 /推理 内容 可以提交个人推理。"))
+                if roleplay.is_rp(game):
+                    items.append(("text", roleplay.opening(game)))
+                else:
+                    items.append(("text", f"《{game['case']['title']}》开局！{engine.status_line(game)}。\n/案件 帮助 查看全部指令；私聊我 /推理 内容 可以提交个人推理。"))
                 return items
-        items.append(("text", prefix + engine.opening(game)))
+        items.append(("text", prefix + (roleplay.opening(game) if roleplay.is_rp(game) else engine.opening(game))))
         return items
 
     async def _illustration(self, game: dict) -> Items:
@@ -454,8 +459,21 @@ class MistDetective(Star):
             host = game["players"].get(game.get("host") or "", {}).get("name") or "开局的人"
             yield event.plain_result(f"只有局长（{host}）或管理员可以推进幕次。")
             return
+        if roleplay.is_rp(game) and game["final"] and umo not in self._busy:
+            self._busy.add(umo)
+            try:
+                for r in self._emit(event, await self._rp_finish(umo, game)):
+                    yield r
+            finally:
+                self._busy.discard(umo)
+            return
         if game["final"] or umo in self._busy or game.get("vote"):
             yield event.plain_result("现在不能推进（已是最后时刻、正在处理或正在投票）。")
+            return
+        if roleplay.is_rp(game):
+            text = roleplay.advance(game)
+            self.storage.save(umo, game)
+            yield event.plain_result("⏭ 局长推进了剧情。\n" + text)
             return
         game["ap"] = 1
         lines = engine.spend(game) + [engine.status_line(game)]
@@ -592,6 +610,230 @@ class MistDetective(Star):
         for r in self._emit(event, await self._opening_items(umo, game, prefix=f"📚 重玩精品案件 #{d['origin']}\n")):
             yield r
 
+    # ------------------------------------------------------------ 指令：角色扮演
+    def _lobby(self, umo: str) -> dict | None:
+        lb = self._lobbies.get(umo)
+        if lb and time.time() - lb["created"] > 15 * 60:
+            self._lobbies.pop(umo, None)
+            return None
+        return lb
+
+    @case_group.command("角色扮演", alias={"剧本杀", "扮演"})
+    async def rp_open(self, event: AstrMessageEvent):
+        umo = event.unified_msg_origin
+        if self._is_private(event):
+            yield event.plain_result("角色扮演要在群里玩。")
+            return
+        game, _ = self._active(umo)
+        if game or umo in self._busy:
+            yield event.plain_result("本群还有进行中的案件，先结案或 /案件 结束 确认。")
+            return
+        if self._lobby(umo):
+            yield event.plain_result("已经在报名了，发 /加入 参加。")
+            return
+        theme = style = None
+        for w in self._args(event, "案件").split()[1:]:
+            if (t := match_theme(w)) and not theme:
+                theme = t
+            elif (st := match_style(w)) and not style:
+                style = st
+            else:
+                yield event.plain_result(f"没认出“{w}”。可以写题材和风格，例如：/案件 角色扮演 民国 社会派")
+                return
+        uid, name = self._who(event)
+        lo, hi = self._rp_range()
+        self._lobbies[umo] = {"host": uid, "players": {uid: name}, "theme": theme, "style": style, "created": time.time()}
+        yield event.plain_result(
+            f"🎭 {name}发起了一局角色扮演推理（{lo}~{hi} 人）！\n"
+            "每人扮演一名嫌疑人，其中一人是凶手，AI 写剧本、发角色卡、当主持。\n"
+            f"想玩的发 /加入；人齐后发起人发 /案件 发车。角色卡会私聊发送，请先加机器人好友。\n当前 1 人：{name}"
+        )
+
+    def _rp_range(self) -> tuple[int, int]:
+        lo = min(6, max(3, self._cfg_int("rp_min_players", 4)))
+        return lo, 6
+
+    @filter.command("加入", alias={"报名"})
+    async def rp_join(self, event: AstrMessageEvent):
+        lb = self._lobby(event.unified_msg_origin)
+        if not lb:
+            yield event.plain_result("现在没有在报名的角色扮演局。发 /案件 角色扮演 发起一局。")
+            return
+        uid, name = self._who(event)
+        if uid in lb["players"]:
+            yield event.plain_result(f"{name}已经在名单里了。")
+            return
+        if len(lb["players"]) >= self._rp_range()[1]:
+            yield event.plain_result("人满了（最多 6 人）。")
+            return
+        lb["players"][uid] = name
+        yield event.plain_result(f"✋ {name}加入！当前 {len(lb['players'])} 人：" + "、".join(lb["players"].values()))
+
+    @filter.command("取消报名", alias={"退出报名"})
+    async def rp_leave(self, event: AstrMessageEvent):
+        lb = self._lobby(event.unified_msg_origin)
+        uid, name = self._who(event)
+        if not lb or uid not in lb["players"]:
+            yield event.plain_result("你不在报名名单里。")
+            return
+        lb["players"].pop(uid)
+        if not lb["players"]:
+            self._lobbies.pop(event.unified_msg_origin, None)
+            yield event.plain_result("报名的人都走了，这局取消。")
+            return
+        if lb["host"] == uid:
+            lb["host"] = next(iter(lb["players"]))
+        yield event.plain_result(f"{name}退出了。当前 {len(lb['players'])} 人：" + "、".join(lb["players"].values()))
+
+    @case_group.command("发车", alias={"开车"})
+    async def rp_start(self, event: AstrMessageEvent):
+        umo = event.unified_msg_origin
+        lb = self._lobby(umo)
+        if not lb:
+            yield event.plain_result("现在没有在报名的角色扮演局。")
+            return
+        uid, _ = self._who(event)
+        if uid != lb["host"] and not self._is_admin(event):
+            yield event.plain_result("只有发起人或管理员可以发车。")
+            return
+        lo, _ = self._rp_range()
+        n = len(lb["players"])
+        if n < lo:
+            yield event.plain_result(f"还差 {lo - n} 人，至少 {lo} 人才能开。")
+            return
+        if umo in self._busy:
+            yield event.plain_result("剧本正在写，请稍等。")
+            return
+        if msg := self._limit_msg(umo):
+            yield event.plain_result(msg)
+            return
+        self._lobbies.pop(umo, None)
+        off_t, off_k = self._disabled()
+        style = lb["style"] or match_style(str(self.config.get("default_style", "本格") or "本格")) or STYLES["honkaku"]
+        sk = pick_skeleton(self._rng, lb["theme"], style, roleplay.rp_difficulty(n), avoid=self.storage.recent_combos(umo),
+                           disabled_themes=off_t, disabled_tricks=off_k)
+        self._busy.add(umo)
+        try:
+            yield event.plain_result(f"🚗 发车！{n} 位玩家，题材：{sk.theme.name}。AI 正在为每个人写剧本，大约需要两三分钟……")
+            try:
+                case = await self._generate(umo, sk, rp=True)
+            except GenFailed as e:
+                self._lobbies[umo] = lb | {"created": time.time()}
+                yield event.plain_result(f"剧本没写成（{e}）。报名名单已保留，发起人可以再发 /案件 发车。")
+                return
+            game = engine.new_game(case, sk, host=lb["host"])
+            roleplay.assign(game, lb["players"], self._rng)
+            self.storage.save(umo, game)
+            self.storage.add_start(umo)
+            for r in self._emit(event, await self._opening_items(umo, game)):
+                yield r
+            failed = await self._send_cards(umo, game)
+            if failed:
+                game["rp"]["dm_failed"] = failed
+                self.storage.save(umo, game)
+                yield event.plain_result("⚠️ 这几位的角色卡没能私聊送达：" + "、".join(failed) + "\n请加机器人好友后私聊发送 /我的角色 领取。")
+            for r in self._emit(event, await self._illustration(game)):
+                yield r
+        finally:
+            self._busy.discard(umo)
+
+    @staticmethod
+    def _private_umo(group_umo: str, uid: str) -> str:
+        platform = group_umo.split(":", 1)[0]
+        return f"{platform}:FriendMessage:{uid}"
+
+    async def _send_cards(self, umo: str, game: dict) -> list[str]:
+        failed = []
+        for uid in game["roles"]:
+            try:
+                await self.context.send_message(self._private_umo(umo, uid), MessageChain().message(roleplay.card_text(game, uid)))
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"[侦探社] 角色卡私聊失败 {uid}：{e}")
+                failed.append(game["players"][uid]["name"])
+        return failed
+
+    @filter.command("我的角色", alias={"角色卡"})
+    async def rp_card(self, event: AstrMessageEvent):
+        uid, _ = self._who(event)
+        if not self._is_private(event):
+            yield event.plain_result("🤫 角色卡只能私聊看：私聊我发 /我的角色。")
+            return
+        games = [(u, g) for u, g in self.storage.games_with_player(uid) if roleplay.is_rp(g) and uid in g.get("roles", {})]
+        if not games:
+            yield event.plain_result("你现在没有在玩角色扮演局。")
+            return
+        for _, g in games:
+            yield event.plain_result(roleplay.card_text(g, uid))
+
+    @filter.command("公开", alias={"亮线索"})
+    async def rp_reveal(self, event: AstrMessageEvent):
+        umo = event.unified_msg_origin
+        game, msg = await self._need_game(event)
+        if not game or not roleplay.is_rp(game):
+            yield event.plain_result(msg or "/公开 只在角色扮演局里用：把你角色卡上的线索正式摆到台面上。")
+            return
+        uid, name = self._who(event)
+        c = roleplay.held_clue(game, uid, self._args(event, "公开", "亮线索"))
+        if not c:
+            yield event.plain_result("没找到这条线索。用你角色卡上的编号，例如 /公开 c3")
+            return
+        if c["id"] in game["found"]:
+            yield event.plain_result("这条线索已经公开过了。")
+            return
+        engine.touch(game, uid, name)
+        engine.give_clues(game, [c["id"]], uid)
+        self.storage.save(umo, game)
+        role = roleplay.role_of(game, uid)
+        yield event.plain_result(f"📌 {name}（{role['name']}）公开了线索：\n{engine.clue_line(c)}")
+
+    @filter.command("投票")
+    async def rp_vote(self, event: AstrMessageEvent):
+        umo = event.unified_msg_origin
+        game, msg = await self._need_game(event)
+        if not game or not roleplay.is_rp(game):
+            yield event.plain_result(msg or "/投票 只在角色扮演局里用；普通局请用 /指认，群聊里会自动发起投票。")
+            return
+        if not game["final"]:
+            yield event.plain_result(f"现在是{roleplay.round_name(game)}，还没到投票阶段。局长 /案件 推进 到最后一轮之后才能投票。")
+            return
+        uid, name = self._who(event)
+        if uid not in game["roles"]:
+            yield event.plain_result("只有本局玩家可以投票。")
+            return
+        s = engine.find_suspect(game, self._args(event, "投票"))
+        if not s:
+            yield event.plain_result("投给谁？" + "，".join(x["name"] for x in engine.suspects(game)))
+            return
+        roleplay.vote(game, uid, s["id"])
+        engine.touch(game, uid, name)
+        self.storage.save(umo, game)
+        done = len(game["rp"]["votes"])
+        total = len(game["roles"])
+        if roleplay.all_voted(game) and umo not in self._busy:
+            self._busy.add(umo)
+            try:
+                yield event.plain_result(f"🗳 {name}已投票（{done}/{total}），全员投完，揭晓！")
+                for r in self._emit(event, await self._rp_finish(umo, game)):
+                    yield r
+            finally:
+                self._busy.discard(umo)
+            return
+        yield event.plain_result(f"🗳 {name}已投票（{done}/{total}）。")
+
+    async def _rp_finish(self, umo: str, game: dict) -> Items:
+        win, lines = roleplay.settle(game)
+        culprit = engine.suspect(game, game["case"]["truth"]["culprit"])
+        try:
+            confess = await self._llm("npc", umo, npc.confess_prompt(game), npc.CONFESS_SYSTEM, 90)
+        except Exception:
+            confess = ""
+        if confess:
+            lines += ["", f"🗣 {culprit['name']}：{confess}"]
+        lines += ["", "角色与扮演者：" + "；".join(f"{s['name']}={roleplay.player_of(game, s['id'])}" for s in engine.suspects(game))]
+        score = 100 if win else 0
+        self.storage.finish(umo, game, "solved" if win else "failed", score)
+        return [("text", "\n".join(lines))] + await self._truth_items(umo, game, score, "solved" if win else "failed", confess)
+
     # ------------------------------------------------------------ 指令：悬案之夜
     @staticmethod
     def _parse_when(text: str, default_wd: int, default_hm: str) -> tuple[int, str] | None:
@@ -666,10 +908,12 @@ class MistDetective(Star):
             self._busy.discard(umo)
 
     # ------------------------------------------------------------ 指令：调查
-    async def _act_guard(self, event: AstrMessageEvent, allow_final: bool = False):
+    async def _act_guard(self, event: AstrMessageEvent, allow_final: bool = False, allow_rp: bool = False):
         game, msg = await self._need_game(event)
         if not game:
             return None, msg
+        if roleplay.is_rp(game) and not allow_rp:
+            return None, "🎭 角色扮演局里，嫌疑人都由群友扮演：直接在群里向 TA 提问吧。可用指令：/搜查 地点｜/公开 线索编号｜/投票 角色名"
         if game["final"] and not allow_final:
             return None, "行动点已经用完了，现在只能 /指认 名字。"
         if event.unified_msg_origin in self._busy:
@@ -743,7 +987,7 @@ class MistDetective(Star):
     @filter.command("搜查", alias={"搜", "调查"})
     async def search(self, event: AstrMessageEvent):
         umo = event.unified_msg_origin
-        game, msg = await self._act_guard(event)
+        game, msg = await self._act_guard(event, allow_rp=True)
         if not game:
             yield event.plain_result(msg)
             return
@@ -758,6 +1002,22 @@ class MistDetective(Star):
             yield event.plain_result(f"{loc}已经被翻了个遍，没有新的发现了（不消耗行动点）。")
             return
         uid, name = self._who(event)
+        if roleplay.is_rp(game):
+            if uid not in game["roles"]:
+                yield event.plain_result("你没有参与这一局。")
+                return
+            if not roleplay.can_search(game, uid):
+                yield event.plain_result(f"{name}本轮已经搜查过了，等局长推进到下一轮吧。")
+                return
+            roleplay.mark_search(game, uid)
+            engine.touch(game, uid, name)
+            new = engine.search(game, loc, uid)
+            if loc not in searched:
+                searched.append(loc)
+            lines = [f"🔎 {name}搜查了{loc}，发现："] + [engine.clue_line(c) for c in new] if new else [f"🔎 {name}把{loc}搜了一遍，没有发现可疑的东西。"]
+            self.storage.save(umo, game)
+            yield event.plain_result("\n".join(lines))
+            return
         engine.touch(game, uid, name)
         new = engine.search(game, loc, uid)
         if loc not in searched:
