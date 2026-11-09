@@ -75,6 +75,7 @@ SCHEMA = """{
       "motive": "可能的动机（隐藏，无辜者也可以有）",
       "secret": "不想让人知道的秘密；凶手的写真实身份或真正动机",
       "knows": "他知道的、关于别人的一件事，被问到时可能说出来",
+      "script": "仅角色扮演模式需要：写给扮演者的个人剧本",
       "lies": [
         {"id": "l1", "topic": "谎言涉及的话题", "lie": "他会怎么说", "truth": "真实情况", "broken_by": "能识破它的线索编号，如 c3"}
       ]
@@ -97,7 +98,15 @@ SCHEMA = """{
 }"""
 
 
-def gen_prompt(sk: Skeleton, feedback: str = "") -> str:
+RP_NOTE = (
+    "【角色扮演】本案由真人玩家扮演全部嫌疑人，其中一人是凶手。每个嫌疑人额外给出 script 字段："
+    "用第二人称写给扮演者的个人剧本（150~250 字），讲清他是谁、和其他人的关系、当晚做了什么、想隐瞒什么、可以怀疑谁；"
+    "凶手的剧本要写清作案经过和掩饰办法。各人剧本之间要能互相印证或互相矛盾，让玩家在讨论中发现破绽。"
+    "证词线索（testimony）分给各位嫌疑人，由玩家自己决定何时说出。"
+)
+
+
+def gen_prompt(sk: Skeleton, feedback: str = "", rp: bool = False) -> str:
     d = sk.diff
     lines = [
         "请设计一个案件。",
@@ -120,6 +129,8 @@ def gen_prompt(sk: Skeleton, feedback: str = "") -> str:
         "请严格按下面的 JSON 结构输出（字段名不要改，id 按 s1、s2…、c1、c2…、l1、l2… 编号）：",
         SCHEMA,
     ]
+    if rp:
+        lines.insert(-2, RP_NOTE)
     if feedback:
         lines += ["", "上一次生成的档案没有通过检查，请修正这些问题后重新完整输出：", feedback]
     return "\n".join(lines)
@@ -248,7 +259,7 @@ def normalize(case: dict) -> dict:
             {
                 "id": _s(s.get("id")) or f"s{i + 1}",
                 "name": _s(s.get("name")) or f"嫌疑人{i + 1}",
-                **{k: _s(s.get(k)) for k in ("identity", "public", "relation", "personality", "speech", "alibi", "motive", "secret", "knows")},
+                **{k: _s(s.get(k)) for k in ("identity", "public", "relation", "personality", "speech", "alibi", "motive", "secret", "knows", "script")},
                 "lies": lies,
             }
         )

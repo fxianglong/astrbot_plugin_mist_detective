@@ -140,5 +140,11 @@
     "type": "bool",
     "default": true,
     "hint": "保存在插件数据目录 debug/ 下，最近 20 份，用于排查生成问题。/案件 诊断 查看统计。"
+  },
+  "rp_min_players": {
+    "description": "角色扮演最少人数",
+    "type": "int",
+    "default": 4,
+    "hint": "3~6，人数越多剧本越复杂、生成越慢。"
   }
 }
