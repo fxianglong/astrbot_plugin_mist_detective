@@ -11,7 +11,7 @@ from astrbot.api.star import Context, Star, StarTools, register
 
 from . import engine, npc, render, roleplay, series
 from .generator import GEN_SYSTEM, SOLVE_SYSTEM, Skeleton, Truncated, gen_prompt, normalize, parse_json, pick_skeleton, solve_prompt, strip_think
-from .illustrate import Illustrator, art_prompt
+from .illustrate import Illustrator, art_prompt, find_dashscope_key
 from .library import (
     DIFFICULTIES,
     STYLES,
@@ -318,8 +318,28 @@ class MistDetective(Star):
         items.append(("text", prefix + (roleplay.opening(game) if roleplay.is_rp(game) else engine.opening(game))))
         return items
 
+    def _image_source(self) -> str:
+        """确定插画用的 Key：插件配置里填了就用它，否则继承 AstrBot 里配置的阿里云百炼。返回说明文字，空串表示没有可用的 Key。"""
+        own = str(self.config.get("dashscope_api_key", "") or "").strip()
+        if own:
+            self.illustrator.api_key = own
+            return "插件配置里的百炼 Key"
+        if not bool(self.config.get("inherit_image_key", True)):
+            self.illustrator.api_key = ""
+            return ""
+        try:
+            found = find_dashscope_key(self.context.get_all_providers())
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[侦探社] 读取 AstrBot 模型配置失败：{e}")
+            found = None
+        if not found:
+            self.illustrator.api_key = ""
+            return ""
+        self.illustrator.api_key, self.illustrator.host = found
+        return "继承自 AstrBot 里配置的阿里云百炼"
+
     async def _illustration(self, game: dict) -> Items:
-        if not self.illustrator.enabled:
+        if not self._image_source():
             return []
         m = game["meta"]
         prompt = art_prompt(m["theme"], game["case"]["intro"], game["case"]["title"])
@@ -530,7 +550,9 @@ class MistDetective(Star):
         for ts, combo, att, okk, secs, rs in rows[:8]:
             t = datetime.fromtimestamp(ts, CN_TZ).strftime("%m-%d %H:%M")
             lines.append(f"{t} {'✅' if okk else '❌'} {combo}｜{att} 次｜{secs:.0f} 秒" + (f"｜{rs[-1][:30]}" if rs else ""))
-        lines.append("\n未通过的原文保存在插件数据目录 debug/ 下（最近 20 份）。")
+        src = self._image_source()
+        lines.append(f"\n开场插画：{src + '，模型 ' + self.illustrator.model if src else '未启用（AstrBot 里没有找到阿里云百炼，插件配置里也没填 Key）'}")
+        lines.append("未通过的原文保存在插件数据目录 debug/ 下（最近 20 份）。")
         yield event.plain_result("\n".join(lines))
 
     @case_group.command("结束", alias={"放弃"})

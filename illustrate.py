@@ -13,8 +13,31 @@ import aiohttp
 
 from astrbot.api import logger
 
-SUBMIT_URL = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text2image/image-synthesis"
-TASK_URL = "https://dashscope.aliyuncs.com/api/v1/tasks/{}"
+CN_HOST = "https://dashscope.aliyuncs.com"
+INTL_HOST = "https://dashscope-intl.aliyuncs.com"
+SUBMIT_PATH = "/api/v1/services/aigc/text2image/image-synthesis"
+TASK_PATH = "/api/v1/tasks/{}"
+
+
+def find_dashscope_key(providers) -> tuple[str, str] | None:
+    """从 AstrBot 已配置的模型提供商里找阿里云百炼（DashScope）的 API Key。
+
+    百炼的对话模型和生图模型共用同一个 Key；按接口地址或提供商类型识别。返回 (key, host)，找不到返回 None。"""
+    for p in providers or []:
+        cfg = getattr(p, "provider_config", None) or getattr(p, "config", None) or {}
+        if not isinstance(cfg, dict) or cfg.get("enable") is False:
+            continue
+        base = str(cfg.get("api_base") or cfg.get("base_url") or "").lower()
+        kind = " ".join(str(cfg.get(k) or "") for k in ("type", "provider", "id")).lower()
+        if "dashscope" not in base and "aliyuncs" not in base and "dashscope" not in kind and "bailian" not in kind:
+            continue
+        keys = cfg.get("key") or cfg.get("api_key") or cfg.get("keys") or []
+        if isinstance(keys, str):
+            keys = [keys]
+        key = next((str(k).strip() for k in keys if str(k).strip()), "")
+        if key:
+            return key, INTL_HOST if "intl" in base else CN_HOST
+    return None
 
 # 每个题材的画面风格；自定义题材用通用描述
 ART = {
@@ -45,6 +68,7 @@ class Illustrator:
         self.out_dir = Path(out_dir)
         self.out_dir.mkdir(parents=True, exist_ok=True)
         self.timeout = timeout
+        self.host = CN_HOST
 
     @property
     def enabled(self) -> bool:
@@ -58,7 +82,7 @@ class Illustrator:
         body = {"model": self.model, "input": {"prompt": prompt}, "parameters": {"size": self.size, "n": 1, "prompt_extend": True, "watermark": False}}
         try:
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as s:
-                async with s.post(SUBMIT_URL, json=body, headers={**headers, "X-DashScope-Async": "enable"}) as r:
+                async with s.post(self.host + SUBMIT_PATH, json=body, headers={**headers, "X-DashScope-Async": "enable"}) as r:
                     d = await r.json(content_type=None)
                 task_id = (d.get("output") or {}).get("task_id")
                 if not task_id:
@@ -69,7 +93,7 @@ class Illustrator:
                 deadline = loop.time() + self.timeout
                 while loop.time() < deadline:
                     await asyncio.sleep(3)
-                    async with s.get(TASK_URL.format(task_id), headers=headers) as r:
+                    async with s.get(self.host + TASK_PATH.format(task_id), headers=headers) as r:
                         d = await r.json(content_type=None)
                     out = d.get("output") or {}
                     st = out.get("task_status")

@@ -140,8 +140,21 @@ async def main():
     e = ev("案件 推进"); e.is_admin = lambda: True
     assert "推进" in (await run(p.advance(e)))[0]
     # ---------- 插画（无 key 不生成；有 key 时调用）
-    assert not p.illustrator.enabled
-    p.illustrator.api_key = "k"
+    assert not p._image_source()
+    # 继承 AstrBot 里配置的百炼提供商
+    from astrbot_plugin_mist_detective.illustrate import find_dashscope_key, INTL_HOST
+    class Prov:
+        def __init__(self, cfg): self.provider_config = cfg
+    provs = [Prov({"id": "deepseek", "api_base": "https://api.deepseek.com/v1", "key": ["sk-ds"]}),
+             Prov({"id": "qwen", "api_base": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1", "key": ["", "sk-qwen"]})]
+    assert find_dashscope_key(provs) == ("sk-qwen", INTL_HOST)
+    assert find_dashscope_key(provs[:1]) is None
+    ctx.get_all_providers = lambda: provs
+    assert "继承" in p._image_source() and p.illustrator.api_key == "sk-qwen"
+    out = await run(p.diagnose(ev("案件 诊断")))
+    assert "继承自 AstrBot" in out[0], out
+    p.config["dashscope_api_key"] = "k"
+    assert "插件配置" in p._image_source() and p.illustrator.api_key == "k"
     async def fake_draw(prompt, name):
         assert "唐代" in prompt or "悬疑" in prompt
         return "/tmp/art.png"
