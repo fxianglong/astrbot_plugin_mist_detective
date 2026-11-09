@@ -126,9 +126,55 @@ def gen_prompt(sk: Skeleton, feedback: str = "") -> str:
 
 
 # ---------------------------------------------------------------- 解析
+THINK_RE = re.compile(r"<think>.*?</think>", re.S)
+
+
+def strip_think(text: str) -> str:
+    """去掉推理模型（如 deepseek-reasoner、qwq）输出里的思考过程。"""
+    t = THINK_RE.sub("", text or "")
+    if "</think>" in t:  # 只有结束标签（开头被截掉）
+        t = t.split("</think>", 1)[1]
+    return t.strip()
+
+
+def _repair_quotes(body: str) -> str:
+    """把字符串内部未转义的英文双引号转义。
+
+    中文模型常写出 "text": "他说"快走"然后……" 这种 JSON；判断方法：字符串里遇到 "，
+    如果后面紧跟的不是 , : } ] 之一，就认为它是正文里的引号。"""
+    out = []
+    in_str = esc = False
+    n = len(body)
+    for i, ch in enumerate(body):
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                j = i + 1
+                while j < n and body[j] in " \t\r\n":
+                    j += 1
+                if j < n and body[j] not in ",:}]":
+                    out.append('\\"')
+                    continue
+                in_str = False
+            elif ch == "\n":
+                out.append("\\n")
+                continue
+        elif ch == '"':
+            in_str = True
+        out.append(ch)
+    return "".join(out)
+
+
+class Truncated(ValueError):
+    pass
+
+
 def parse_json(text: str) -> dict:
-    """从模型输出中取出第一个 JSON 对象，兼容代码块、前后多余文字和行尾逗号。"""
-    t = (text or "").strip()
+    """从模型输出中取出第一个 JSON 对象，兼容思考过程、代码块、前后多余文字、行尾逗号和正文里的引号。"""
+    t = strip_think(text)
     t = re.sub(r"^```(?:json)?\s*|\s*```$", "", t, flags=re.M)
     start = t.find("{")
     if start < 0:
@@ -156,13 +202,17 @@ def parse_json(text: str) -> dict:
                 end = i
                 break
     if end < 0:
-        raise ValueError("JSON 不完整（可能被截断）")
+        raise Truncated("JSON 不完整（输出可能被截断）")
     body = t[start : end + 1]
     try:
         return json.loads(body)
     except json.JSONDecodeError:
-        body = re.sub(r",\s*([}\]])", r"\1", body)
+        pass
+    body = re.sub(r",\s*([}\]])", r"\1", body)
+    try:
         return json.loads(body)
+    except json.JSONDecodeError:
+        return json.loads(_repair_quotes(body))
 
 
 def _s(v) -> str:

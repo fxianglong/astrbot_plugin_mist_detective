@@ -10,7 +10,7 @@ from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.star import Context, Star, StarTools, register
 
 from . import engine, npc, render
-from .generator import GEN_SYSTEM, SOLVE_SYSTEM, Skeleton, gen_prompt, normalize, parse_json, pick_skeleton, solve_prompt
+from .generator import GEN_SYSTEM, SOLVE_SYSTEM, Skeleton, Truncated, gen_prompt, normalize, parse_json, pick_skeleton, solve_prompt, strip_think
 from .illustrate import Illustrator, art_prompt
 from .library import (
     DIFFICULTIES,
@@ -144,7 +144,7 @@ class MistDetective(Star):
         resp = await asyncio.wait_for(
             self.context.llm_generate(chat_provider_id=pid, prompt=prompt, system_prompt=system), timeout=timeout
         )
-        return (getattr(resp, "completion_text", "") or "").strip()
+        return strip_think(getattr(resp, "completion_text", "") or "")
 
     async def _render(self, tmpl: str, data: dict, umo: str | None = None) -> str | None:
         try:
@@ -208,34 +208,60 @@ class MistDetective(Star):
         return themes, tricks
 
     # ------------------------------------------------------------ 生成
+    def _dump(self, tag: str, text: str) -> None:
+        """保存没通过的档案原文，方便排查；只保留最近 20 份。"""
+        if not bool(self.config.get("debug_dump", True)):
+            return
+        try:
+            d = self.data_dir / "debug"
+            d.mkdir(exist_ok=True)
+            (d / f"{datetime.now(CN_TZ).strftime('%m%d_%H%M%S')}_{tag}.txt").write_text(text or "", encoding="utf-8")
+            for old in sorted(d.glob("*.txt"))[:-20]:
+                old.unlink()
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[侦探社] 保存调试文件失败：{e}")
+
     async def _generate(self, umo: str, sk) -> dict:
         timeout = self._cfg_int("gen_timeout", 240)
         attempts = max(1, self._cfg_int("gen_attempts", 3))
         verify = bool(self.config.get("verify_solvable", True))
+        combo = f"{sk.theme.name}/{sk.trick.name}/{sk.style.name}/{sk.diff.name}"
         feedback = ""
-        last_err = ""
+        reasons: list[str] = []
+        t0 = time.time()
         for i in range(attempts):
+            t1 = time.time()
             try:
                 text = await self._llm("gen", umo, gen_prompt(sk, feedback), GEN_SYSTEM, timeout)
             except asyncio.TimeoutError:
-                last_err = "模型响应超时，可以在插件配置里调大生成超时"
+                reasons.append(f"超时（{timeout} 秒）")
+                logger.warning(f"[侦探社] 生成 {combo} 第 {i + 1} 次：超时")
                 continue
             except Exception as e:
-                last_err = f"模型调用失败：{e}"
-                logger.warning(f"[侦探社] 第 {i + 1} 次生成调用失败：{e}")
+                reasons.append(f"调用失败：{e}")
+                logger.warning(f"[侦探社] 生成 {combo} 第 {i + 1} 次：调用失败 {e}")
                 continue
+            logger.info(f"[侦探社] 生成 {combo} 第 {i + 1} 次：模型返回 {len(text)} 字，用时 {time.time() - t1:.0f} 秒")
             try:
                 case = normalize(parse_json(text))
-            except Exception as e:  # 解析失败
-                last_err = f"档案格式错误：{e}"
-                feedback = "输出不是合法的 JSON，请只输出一个完整的 JSON 对象。"
-                logger.warning(f"[侦探社] 第 {i + 1} 次生成解析失败：{e}")
+            except Truncated:
+                reasons.append("输出被截断")
+                feedback = "上一次输出太长被截断了。请精简：每条描述控制在 60 字以内，时间线不超过 14 条，线索不超过 14 张，并确保 JSON 完整闭合。"
+                self._dump("truncated", text)
+                logger.warning(f"[侦探社] 生成 {combo} 第 {i + 1} 次：输出被截断（可调大模型的最大输出长度）")
+                continue
+            except Exception as e:
+                reasons.append(f"JSON 解析失败：{e}")
+                feedback = "输出不是合法的 JSON，请只输出一个完整的 JSON 对象，字符串里的引号请用中文引号「」或“”。"
+                self._dump("badjson", text)
+                logger.warning(f"[侦探社] 生成 {combo} 第 {i + 1} 次：解析失败 {e}")
                 continue
             errs = validate(case, sk.diff)
             if errs:
-                last_err = errs[0]
+                reasons.append("校验：" + errs[0])
                 feedback = "\n".join(f"- {e}" for e in errs[:12])
-                logger.info(f"[侦探社] 第 {i + 1} 次生成未通过：{errs}")
+                self._dump("invalid", text + "\n\n# 校验问题\n" + feedback)
+                logger.info(f"[侦探社] 生成 {combo} 第 {i + 1} 次：未通过校验 {errs}")
                 continue
             if verify:
                 try:
@@ -245,15 +271,33 @@ class MistDetective(Star):
                     ans = None
                 if ans is not None and not solve_matches(case, str(ans)):
                     cul = engine.suspect({"case": case}, case["truth"]["culprit"])
-                    last_err = "线索有歧义，推不出唯一凶手"
+                    reasons.append(f"盲解推出“{ans}”，真凶是{cul['name']}")
                     feedback = (
                         f"- 只看线索的侦探推出的凶手是“{ans}”，而真凶是 {cul['name']}。线索有歧义：请加强指向 {cul['name']} 的关键线索，"
                         f"让破绽更明确，并确保对“{ans}”的怀疑能被某条线索合理解释掉。"
                     )
-                    logger.info(f"[侦探社] 第 {i + 1} 次生成盲解不一致：{ans}")
+                    self._dump("ambiguous", text + "\n\n# 盲解\n" + str(ans))
+                    logger.info(f"[侦探社] 生成 {combo} 第 {i + 1} 次：盲解不一致 {ans}")
                     continue
+            secs = time.time() - t0
+            self.storage.log_gen(umo, combo, i + 1, True, secs, reasons)
+            logger.info(f"[侦探社] 生成 {combo} 成功：第 {i + 1} 次通过，共 {secs:.0f} 秒")
             return case
-        raise GenFailed(last_err or "未知原因")
+        secs = time.time() - t0
+        self.storage.log_gen(umo, combo, attempts, False, secs, reasons)
+        logger.warning(f"[侦探社] 生成 {combo} 失败：{reasons}")
+        last = reasons[-1] if reasons else "未知原因"
+        if last.startswith("盲解"):  # 不在群里暴露废弃案件的凶手
+            last = "线索有歧义，推不出唯一凶手"
+        raise GenFailed(last)
+
+    def _tune(self, game: dict) -> dict:
+        """按配置缩放行动点和紧张度，便于实测调节奏。"""
+        ap = max(30, self._cfg_int("ap_scale", 100)) / 100
+        game["ap_plan"] = [max(2, round(x * ap)) for x in game["ap_plan"]]
+        game["ap"] = game["ap_plan"][0]
+        game["tune"] = {"pressure": max(30, self._cfg_int("pressure_scale", 100)) / 100}
+        return game
 
     async def _opening_items(self, umo: str, game: dict, prefix: str = "") -> Items:
         items: Items = []
@@ -285,7 +329,7 @@ class MistDetective(Star):
         except Exception as e:
             logger.error(f"[侦探社] 生成失败：{e}")
             return None, [("text", f"生成案件时出错：{e}")]
-        game = engine.new_game(case, sk, host=host)
+        game = self._tune(engine.new_game(case, sk, host=host))
         if host:  # 局长算作本案侦探，可以私聊提交推理、参与投票
             game["players"][host] = {"name": host_name or host, "pts": 0, "actions": 0}
         self.storage.save(umo, game)
@@ -435,6 +479,31 @@ class MistDetective(Star):
         lines.append("称号：见习侦探 → 侦探（破 3 案）→ 名侦探（10）→ 神探（25）")
         yield event.plain_result("\n".join(lines))
 
+    @case_group.command("诊断", alias={"日志"})
+    async def diagnose(self, event: AstrMessageEvent):
+        rows = self.storage.gen_stats(30)
+        if not rows:
+            yield event.plain_result("还没有生成记录。")
+            return
+        ok = [r for r in rows if r[3]]
+        lines = [
+            f"🩺 最近 {len(rows)} 次案件生成",
+            f"成功 {len(ok)}/{len(rows)}｜一次通过 {sum(1 for r in ok if r[2] == 1)}｜平均用时 {sum(r[4] for r in ok) / max(1, len(ok)):.0f} 秒｜平均尝试 {sum(r[2] for r in rows) / len(rows):.1f} 次",
+        ]
+        reasons: dict[str, int] = {}
+        for r in rows:
+            for x in r[5]:
+                k = x.split("：")[0] if not x.startswith("校验") else x[:30]
+                reasons[k] = reasons.get(k, 0) + 1
+        if reasons:
+            lines.append("未通过原因：" + "；".join(f"{k}×{v}" for k, v in sorted(reasons.items(), key=lambda kv: -kv[1])[:6]))
+        lines.append("")
+        for ts, combo, att, okk, secs, rs in rows[:8]:
+            t = datetime.fromtimestamp(ts, CN_TZ).strftime("%m-%d %H:%M")
+            lines.append(f"{t} {'✅' if okk else '❌'} {combo}｜{att} 次｜{secs:.0f} 秒" + (f"｜{rs[-1][:30]}" if rs else ""))
+        lines.append("\n未通过的原文保存在插件数据目录 debug/ 下（最近 20 份）。")
+        yield event.plain_result("\n".join(lines))
+
     @case_group.command("结束", alias={"放弃"})
     async def abandon(self, event: AstrMessageEvent):
         umo = event.unified_msg_origin
@@ -514,7 +583,7 @@ class MistDetective(Star):
             int(meta.get("seed") or 0),
         )
         uid, uname = self._who(event)
-        game = engine.new_game(d["case"], sk, host=uid, replay_of=d["origin"])
+        game = self._tune(engine.new_game(d["case"], sk, host=uid, replay_of=d["origin"]))
         game["players"][uid] = {"name": uname, "pts": 0, "actions": 0}
         if meta.get("theme_name"):
             game["meta"]["theme_name"] = meta["theme_name"]

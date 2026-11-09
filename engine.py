@@ -228,7 +228,8 @@ def mark_broken(game: dict, lies: list[dict], uid: str) -> None:
 def add_pressure(game: dict, sid: str, delta: int) -> bool:
     """加紧张度；本次刚好崩溃时返回 True。"""
     before = game["pressure"].get(sid, 0)
-    after = max(0, min(BREAK_AT, before + int(delta)))
+    delta = round(int(delta) * (game.get("tune") or {}).get("pressure", 1.0))
+    after = max(0, min(BREAK_AT, before + delta))
     game["pressure"][sid] = after
     if after >= BREAK_AT and sid not in game["broke_down"]:
         game["broke_down"].append(sid)
