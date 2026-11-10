@@ -1,7 +1,27 @@
 name: astrbot_plugin_mist_detective
 display_name: 雾夜侦探社
-desc: AI 现场生成剧本的群聊推理游戏。四种题材、六种诡计、三种风格，群友一起审讯嫌疑人、搜查现场、出示证据，在行动点用完前指认真凶。每个案件都经过可解性和唯一解检查。
-short_desc: AI 生成剧本的群聊推理游戏
-version: v0.5.0
+short_desc: AI 现场生成剧本的群聊推理游戏，审讯、搜证、对质、投票指认真凶
+desc: |
+  AI 现场生成剧本的群聊推理游戏。群友一起审讯嫌疑人、搜查现场、出示证据、让嫌疑人当面对质，在行动点用完前投票指认真凶。
+
+  - 10 个题材（风雪客栈、民国百乐门、绿皮火车、赛博都市……）× 12 种诡计 × 本格/社会派/喜剧三种风格，另可自定义题材
+  - 每个案件都先过可解性与唯一解检查：线索够用、时间线自洽、只看线索能推出唯一凶手
+  - 嫌疑人会撒谎、会被证据戳穿、被问急了会情绪崩溃；无辜者也有自己的秘密
+  - 角色扮演模式：群友各自扮演嫌疑人，其中一人是凶手，AI 写剧本、私聊发角色卡、当主持
+  - 系列主线《灰蛾》五章连续剧情；精品案件库与跨群重玩；每周定时「悬案之夜」
+  - 开场卷宗、线索墙、结案时间线发图片；可用通义生图配开场插画
+  模型直接使用 AstrBot 当前的对话模型，无需额外配置。
+version: 0.5.0
 author: fxianglong
 repo: https://github.com/fxianglong/astrbot_plugin_mist_detective
+social_link: https://github.com/fxianglong
+support_platforms:
+  - aiocqhttp
+  - qq_official
+  - telegram
+tags:
+  - 游戏
+  - 娱乐
+  - 推理
+  - 剧本杀
+  - 群聊

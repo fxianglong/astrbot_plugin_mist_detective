@@ -4,6 +4,20 @@ AstrBot 群聊推理游戏插件。每个案件都由 AI 现场生成，群友�
 
 > 大雪封山第三夜，悦来客栈的掌柜倒在自己房里，桌上的酒壶还温着。门从里面闩死，窗外的雪地上没有一个脚印。客栈里只剩四个人，谁也走不了……
 
+<p align="center">
+  <img src="docs/opening.png" width="32%" alt="开场卷宗">
+  <img src="docs/board.png" width="32%" alt="线索墙">
+  <img src="docs/closing.png" width="32%" alt="结案报告">
+</p>
+<p align="center"><sub>开场卷宗 · 线索墙 · 结案报告（示例案件）</sub></p>
+
+## 安装
+
+- 在 AstrBot WebUI 的插件市场搜索「雾夜侦探社」安装；或者
+- 在插件管理里通过仓库地址安装：`https://github.com/fxianglong/astrbot_plugin_mist_detective`
+
+装好后在群里发 `/案件 开局` 即可开始。模型直接使用 AstrBot 当前的对话模型，推荐 DeepSeek、Qwen 等推理较强的模型。
+
 ## 特点
 
 - **每局都不一样**：程序从题材库和诡计库里随机组合骨架，大模型把它写成有气氛、有人味的故事。
